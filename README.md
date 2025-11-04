@@ -709,5 +709,5 @@ MIT License - see LICENSE file for details.
 ## Support
 
 For issues and questions:
-- GitHub Issues: https://github.com/cyrilcaoyang/pizerocam/issues
+- GitHub Issues: https://github.com/AccelerationConsortium/pizerocam/issues
 - Email: cyrilcaoyang@gmail.com
