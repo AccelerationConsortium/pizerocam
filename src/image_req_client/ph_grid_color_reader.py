@@ -36,43 +36,30 @@ def detect_text_boxes(image_path):
         vertices = [(v.x, v.y) for v in text.bounding_poly.vertices]
         detections.append({
             'text': text.description,
-            'bbox': vertices,
-            'confidence': getattr(text, 'confidence', 1.0)  # Store confidence if available
+            'bbox': vertices
         })
     return image, detections
 
-def filter_valid_ph_detections(detections, image_shape, min_confidence=0.5):
+def filter_valid_ph_detections(detections, image_shape):
     """
-    Filter detections to keep only valid pH numbers (1-14) and remove duplicates.
+    Filter detections to keep only valid pH numbers (1-14) and remove duplicates using IoU clustering.
     
     Args:
         detections: List of detection dicts from Vision API
-        image_shape: (height, width, channels) of image for spatial filtering
-        min_confidence: Minimum confidence threshold (0.0 - 1.0)
+        image_shape: (height, width, channels) of image
     
     Returns:
         Filtered list of detections
     """
     filtered = []
-    height, width = image_shape[:2]
     
-    # Define expected region (top 70% of image for grid numbers, excluding bottom label area)
-    valid_y_max = int(height * 0.7)
-    
-    print(f"Filtering detections (image size: {width}x{height}, valid_y_max: {valid_y_max})...")
+    print(f"Processing {len(detections)} OCR detections...")
     
     for det in detections:
         text = det['text']
-        bbox = det['bbox']
-        confidence = det.get('confidence', 1.0)
-        
-        # Calculate center for spatial checks
-        avg_y = np.mean([p[1] for p in bbox])
-        avg_x = np.mean([p[0] for p in bbox])
         
         # Filter 1: Must be numeric
         if not text.isdigit():
-            print(f"  Rejected '{text}' - not a digit")
             continue
         
         # Filter 2: Must be valid pH range (1-14)
@@ -84,31 +71,21 @@ def filter_valid_ph_detections(detections, image_shape, min_confidence=0.5):
         except ValueError:
             continue
         
-        # Filter 3: Check confidence if available
-        if confidence < min_confidence:
-            print(f"  Rejected '{text}' - low confidence ({confidence:.2f})")
-            continue
-        
-        # Filter 4: Spatial filtering - reject if too low in image (likely labels, not grid numbers)
-        if avg_y > valid_y_max:
-            print(f"  Rejected '{text}' at y={avg_y:.0f} - below valid region ({valid_y_max})")
-            continue
-        
         filtered.append(det)
     
-    print(f"After basic filtering: {len(filtered)} detections (from {len(detections)} original)")
+    print(f"After basic filtering: {len(filtered)} valid pH detections (from {len(detections)} total)")
     
-    # Filter 5: Remove spatial duplicates (same text in overlapping positions)
+    # Remove spatial duplicates using IoU clustering
     filtered = remove_duplicate_detections(filtered)
     
     return filtered
 
 def remove_duplicate_detections(detections, overlap_threshold=0.5):
     """
-    Remove duplicate detections of the same text at overlapping positions.
+    Remove duplicate detections of the same text at overlapping positions using IoU clustering.
     
     Uses IoU (Intersection over Union) to detect overlapping bounding boxes.
-    When duplicates found, keeps the one with higher confidence.
+    When duplicates found, keeps the first one encountered.
     
     Args:
         detections: List of detection dicts
@@ -178,13 +155,10 @@ def remove_duplicate_detections(detections, overlap_threshold=0.5):
             deduplicated.append(group[0])
             continue
         
-        # Sort by confidence (highest first)
-        group_sorted = sorted(group, key=lambda d: d.get('confidence', 1.0), reverse=True)
+        # Keep first, check others for overlap
+        kept = [group[0]]
         
-        # Keep first (highest confidence), check others for overlap
-        kept = [group_sorted[0]]
-        
-        for det in group_sorted[1:]:
+        for det in group[1:]:
             # Check if this detection overlaps with any kept detection
             is_duplicate = False
             for kept_det in kept:
@@ -204,8 +178,9 @@ def remove_duplicate_detections(detections, overlap_threshold=0.5):
         
         deduplicated.extend(kept)
     
-    print(f"Removed {duplicates_removed} duplicate detection(s)")
-    print(f"Final count: {len(deduplicated)} detections")
+    if duplicates_removed > 0:
+        print(f"Removed {duplicates_removed} duplicate detection(s)")
+    print(f"Final count: {len(deduplicated)} unique pH detections")
     
     return deduplicated
 
@@ -566,8 +541,8 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
     
     image, detections = detect_text_boxes(image_path)
     
-    # Filter out invalid and duplicate detections
-    detections = filter_valid_ph_detections(detections, image.shape, min_confidence=0.5)
+    # Filter out invalid and duplicate detections using IoU clustering
+    detections = filter_valid_ph_detections(detections, image.shape)
     
     # Compute average width of single-digit boxes
     single_digit_widths = [
