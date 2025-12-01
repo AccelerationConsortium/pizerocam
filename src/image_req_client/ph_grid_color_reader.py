@@ -80,15 +80,14 @@ def filter_valid_ph_detections(detections, image_shape):
     
     return filtered
 
-def remove_duplicate_detections(detections, overlap_threshold=0.3, center_threshold=50):
+def remove_duplicate_detections(detections, overlap_threshold=0.3):
     """
     Remove duplicate detections of the same text at overlapping positions using IoU clustering
-    and center distance checking.
+    and adaptive center distance checking.
     
     Args:
         detections: List of detection dicts
         overlap_threshold: IoU threshold to consider boxes as duplicates (0.0 - 1.0)
-        center_threshold: Max distance between centers to consider duplicates (pixels)
     
     Returns:
         Deduplicated list of detections
@@ -96,6 +95,23 @@ def remove_duplicate_detections(detections, overlap_threshold=0.3, center_thresh
     if len(detections) <= 1:
         return detections
     
+    # Calculate average bounding box width/height to use as dynamic threshold
+    widths = []
+    heights = []
+    for det in detections:
+        x = [p[0] for p in det['bbox']]
+        y = [p[1] for p in det['bbox']]
+        widths.append(max(x) - min(x))
+        heights.append(max(y) - min(y))
+    
+    avg_width = np.mean(widths) if widths else 50
+    avg_height = np.mean(heights) if heights else 50
+    
+    # Use half the average dimension as the distance threshold
+    # This makes it robust to different image resolutions
+    center_threshold = min(avg_width, avg_height) * 0.8
+    print(f"Duplicate removal threshold: {center_threshold:.1f} pixels (based on text size)")
+
     def box_area(bbox):
         """Calculate area of bounding box."""
         x_coords = [p[0] for p in bbox]
@@ -172,13 +188,13 @@ def remove_duplicate_detections(detections, overlap_threshold=0.3, center_thresh
                 iou = box_iou(det['bbox'], kept_det['bbox'])
                 dist = center_distance(det['bbox'], kept_det['bbox'])
                 
-                # Consider duplicate if IoU is high OR centers are very close
+                # Consider duplicate if IoU is high OR centers are close relative to text size
                 if iou > overlap_threshold or dist < center_threshold:
                     is_duplicate = True
                     duplicates_removed += 1
                     x1 = np.mean([p[0] for p in det['bbox']])
                     x2 = np.mean([p[0] for p in kept_det['bbox']])
-                    print(f"  Removed duplicate '{text}' - IoU={iou:.2f}, Dist={dist:.1f}px (x1={x1:.0f}, x2={x2:.0f})")
+                    print(f"  Removed duplicate '{text}' - IoU={iou:.2f}, Dist={dist:.1f}px (Threshold={center_threshold:.1f}px)")
                     break
             
             if not is_duplicate:
@@ -336,6 +352,7 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=1.3):
     Uses spatial analysis to distinguish between:
     - Valid multi-digit pH values (10-14) that should stay together
     - Multiple single-digit pH values (456) that were incorrectly grouped
+    - False positives like "12" (actually 1 and 2) that are too wide
     
     Args:
         det: Detection dict with 'text' and 'bbox'
@@ -357,21 +374,11 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=1.3):
     if not (N > 1 and text.isdigit()):
         return [det]
     
-    # Strategy 1: Check if it's a valid multi-digit pH value (10-14)
-    try:
-        ph_val = int(text)
-        if 10 <= ph_val <= 14:
-            # Valid two-digit pH - DON'T split
-            print(f"  Keeping '{text}' intact (valid pH {ph_val})")
-            return [det]
-    except ValueError:
-        pass
-    
-    # Strategy 2: Use spatial analysis - check per-digit width
+    # Check per-digit width FIRST
+    # If per-digit width is significantly larger than avg single digit,
+    # it means the digits are spaced far apart (likely separate pH values, even if text is "12")
     per_digit_width = box_width / N
     
-    # If per-digit width is significantly larger than avg single digit,
-    # it means the digits are spaced far apart (likely separate pH values)
     if per_digit_width > avg_digit_width * width_thresh:
         print(f"  Splitting '{text}' (per-digit width {per_digit_width:.1f}px > {avg_digit_width:.1f}px × {width_thresh})")
         new_dets = []
@@ -384,7 +391,9 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=1.3):
                 center_x = int(x_min + i * (box_width) / (N - 1))
             
             # Use either average digit width or proportional width, whichever is smaller
-            estimated_char_width = min(avg_digit_width, box_width // N)
+            # Clamp lower bound to avoid too-narrow boxes
+            estimated_char_width = max(40, min(avg_digit_width, box_width // N))
+            
             char_x1 = int(center_x - estimated_char_width // 2)
             char_x2 = int(center_x + estimated_char_width // 2)
             
@@ -400,11 +409,22 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=1.3):
             ]
             new_dets.append({'text': char, 'bbox': char_bbox})
         return new_dets
-    else:
-        # Digits are close together - likely a single multi-digit number
-        # But it's not a valid pH (not 10-14), so it will be filtered out later
-        print(f"  Keeping '{text}' intact (compact spacing: {per_digit_width:.1f}px per digit)")
-        return [det]
+        
+    # Strategy 2: Check if it's a valid multi-digit pH value (10-14)
+    # Only applies if it wasn't already split due to width
+    try:
+        ph_val = int(text)
+        if 10 <= ph_val <= 14:
+            # Valid two-digit pH and narrow enough - DON'T split
+            print(f"  Keeping '{text}' intact (valid pH {ph_val})")
+            return [det]
+    except ValueError:
+        pass
+    
+    # Digits are close together - likely a single multi-digit number
+    # But it's not a valid pH (not 10-14), so it will be filtered out later
+    print(f"  Keeping '{text}' intact (compact spacing: {per_digit_width:.1f}px per digit)")
+    return [det]
 
 def get_average_colors(image, color_boxes):
     """
