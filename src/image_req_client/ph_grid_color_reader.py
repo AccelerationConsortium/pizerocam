@@ -80,16 +80,15 @@ def filter_valid_ph_detections(detections, image_shape):
     
     return filtered
 
-def remove_duplicate_detections(detections, overlap_threshold=0.5):
+def remove_duplicate_detections(detections, overlap_threshold=0.3, center_threshold=50):
     """
-    Remove duplicate detections of the same text at overlapping positions using IoU clustering.
-    
-    Uses IoU (Intersection over Union) to detect overlapping bounding boxes.
-    When duplicates found, keeps the first one encountered.
+    Remove duplicate detections of the same text at overlapping positions using IoU clustering
+    and center distance checking.
     
     Args:
         detections: List of detection dicts
         overlap_threshold: IoU threshold to consider boxes as duplicates (0.0 - 1.0)
+        center_threshold: Max distance between centers to consider duplicates (pixels)
     
     Returns:
         Deduplicated list of detections
@@ -137,6 +136,14 @@ def remove_duplicate_detections(detections, overlap_threshold=0.5):
             return 0.0
         
         return inter_area / union_area
+
+    def center_distance(bbox1, bbox2):
+        """Calculate Euclidean distance between box centers."""
+        x1 = np.mean([p[0] for p in bbox1])
+        y1 = np.mean([p[1] for p in bbox1])
+        x2 = np.mean([p[0] for p in bbox2])
+        y2 = np.mean([p[1] for p in bbox2])
+        return np.sqrt((x1 - x2)**2 + (y1 - y2)**2)
     
     # Group detections by text
     text_groups = {}
@@ -159,18 +166,19 @@ def remove_duplicate_detections(detections, overlap_threshold=0.5):
         kept = [group[0]]
         
         for det in group[1:]:
-            # Check if this detection overlaps with any kept detection
+            # Check if this detection overlaps or is close to any kept detection
             is_duplicate = False
             for kept_det in kept:
                 iou = box_iou(det['bbox'], kept_det['bbox'])
-                if iou > overlap_threshold:
+                dist = center_distance(det['bbox'], kept_det['bbox'])
+                
+                # Consider duplicate if IoU is high OR centers are very close
+                if iou > overlap_threshold or dist < center_threshold:
                     is_duplicate = True
                     duplicates_removed += 1
-                    bbox1 = det['bbox']
-                    bbox2 = kept_det['bbox']
-                    x1 = np.mean([p[0] for p in bbox1])
-                    x2 = np.mean([p[0] for p in bbox2])
-                    print(f"  Removed duplicate '{text}' - IoU={iou:.2f} (x1={x1:.0f}, x2={x2:.0f})")
+                    x1 = np.mean([p[0] for p in det['bbox']])
+                    x2 = np.mean([p[0] for p in kept_det['bbox']])
+                    print(f"  Removed duplicate '{text}' - IoU={iou:.2f}, Dist={dist:.1f}px (x1={x1:.0f}, x2={x2:.0f})")
                     break
             
             if not is_duplicate:
