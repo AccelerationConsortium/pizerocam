@@ -321,7 +321,22 @@ def draw_color_boxes(image, detections, color_boxes, out_path=None):
         print(f"Saved labeled color box image to {out_path}")
     return img
 
-def split_multi_digit_detection(det, avg_digit_width, width_thresh=2):
+def split_multi_digit_detection(det, avg_digit_width, width_thresh=1.3):
+    """
+    Intelligently split multi-digit numeric detections into individual digits.
+    
+    Uses spatial analysis to distinguish between:
+    - Valid multi-digit pH values (10-14) that should stay together
+    - Multiple single-digit pH values (456) that were incorrectly grouped
+    
+    Args:
+        det: Detection dict with 'text' and 'bbox'
+        avg_digit_width: Average width of single-digit detections
+        width_thresh: Threshold multiplier - split if per-digit width exceeds this
+    
+    Returns:
+        List of detection dicts (split or original)
+    """
     text = det['text']
     bbox = det['bbox']
     x_coords = [p[0] for p in bbox]
@@ -329,20 +344,46 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=2):
     x_min, x_max = min(x_coords), max(x_coords)
     y_min, y_max = min(y_coords), max(y_coords)
     box_width = x_max - x_min
-    per_digit_width = box_width / len(text)
     N = len(text)
-    if N > 1 and text.isdigit() and per_digit_width > avg_digit_width * width_thresh:
+    
+    if not (N > 1 and text.isdigit()):
+        return [det]
+    
+    # Strategy 1: Check if it's a valid multi-digit pH value (10-14)
+    try:
+        ph_val = int(text)
+        if 10 <= ph_val <= 14:
+            # Valid two-digit pH - DON'T split
+            print(f"  Keeping '{text}' intact (valid pH {ph_val})")
+            return [det]
+    except ValueError:
+        pass
+    
+    # Strategy 2: Use spatial analysis - check per-digit width
+    per_digit_width = box_width / N
+    
+    # If per-digit width is significantly larger than avg single digit,
+    # it means the digits are spaced far apart (likely separate pH values)
+    if per_digit_width > avg_digit_width * width_thresh:
+        print(f"  Splitting '{text}' (per-digit width {per_digit_width:.1f}px > {avg_digit_width:.1f}px × {width_thresh})")
         new_dets = []
         for i, char in enumerate(text):
+            # Distribute characters evenly across the bounding box
             if N == 1:
                 center_x = (x_min + x_max) // 2
             else:
+                # Linear interpolation between left and right edges
                 center_x = int(x_min + i * (box_width) / (N - 1))
-            char_x1 = int(center_x - avg_digit_width // 2)
-            char_x2 = int(center_x + avg_digit_width // 2)
-            # Clamp to box
+            
+            # Use either average digit width or proportional width, whichever is smaller
+            estimated_char_width = min(avg_digit_width, box_width // N)
+            char_x1 = int(center_x - estimated_char_width // 2)
+            char_x2 = int(center_x + estimated_char_width // 2)
+            
+            # Clamp to original box boundaries
             char_x1 = max(x_min, char_x1)
             char_x2 = min(x_max, char_x2)
+            
             char_bbox = [
                 (char_x1, y_min),
                 (char_x2, y_min),
@@ -352,6 +393,9 @@ def split_multi_digit_detection(det, avg_digit_width, width_thresh=2):
             new_dets.append({'text': char, 'bbox': char_bbox})
         return new_dets
     else:
+        # Digits are close together - likely a single multi-digit number
+        # But it's not a valid pH (not 10-14), so it will be filtered out later
+        print(f"  Keeping '{text}' intact (compact spacing: {per_digit_width:.1f}px per digit)")
         return [det]
 
 def get_average_colors(image, color_boxes):
@@ -480,15 +524,22 @@ def interpolate_ph_from_distances(distances):
     Args:
         distances: Dict of {pH_string: distance}
     Returns:
-        Interpolated pH value rounded to 1 decimal place as float
+        Interpolated pH value rounded to 1 decimal place as float, or None if invalid
     """
+    if not distances:
+        return None
+
     # Convert pH strings to floats and sort by distance
-    ph_distances = [(float(ph), dist) for ph, dist in distances.items()]
+    try:
+        ph_distances = [(float(ph), dist) for ph, dist in distances.items()]
+    except ValueError:
+        return None
+
     sorted_phs = sorted(ph_distances, key=lambda x: x[1])
     
     if len(sorted_phs) < 2:
         # Not enough references for interpolation
-        return round(sorted_phs[0][0], 1)
+        return round(sorted_phs[0][0], 1) if sorted_phs else None
     
     # Get two closest pH values
     ph1, dist1 = sorted_phs[0]
@@ -541,33 +592,45 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
     
     image, detections = detect_text_boxes(image_path)
     
-    # Filter out invalid and duplicate detections using IoU clustering
-    detections = filter_valid_ph_detections(detections, image.shape)
-    
+    # STEP 1: Split multi-digit detections FIRST (before filtering)
     # Compute average width of single-digit boxes
     single_digit_widths = [
         max([p[0] for p in det['bbox']]) - min([p[0] for p in det['bbox']])
         for det in detections if len(det['text']) == 1 and det['text'].isdigit()
     ]
     avg_digit_width = np.mean(single_digit_widths) if single_digit_widths else 40
-    # Split multi-digit detections
+    
+    # Split multi-digit detections (e.g., "456" -> "4", "5", "6")
     split_detections = []
     for det in detections:
         split_detections.extend(split_multi_digit_detection(det, avg_digit_width))
     detections = split_detections
+    
+    # STEP 2: Filter out invalid and duplicate detections
+    detections = filter_valid_ph_detections(detections, image.shape)
+    
+    if not detections:
+        print("[ERROR] No valid pH numbers detected.")
+        return "NULL"
+
     out_path1 = output_dir / f"{input_filename}_step1_text_boxes.png"
     draw_text_boxes(image, detections, str(out_path1))
 
-    # --- STEP 2 ---
+    # --- STEP 3: Cluster rows and define color boxes ---
     rows = cluster_rows(detections)
     
     color_boxes = define_color_boxes(rows)
     out_path2 = output_dir / f"{input_filename}_step2_color_boxes.png"
     draw_color_boxes(image, detections, color_boxes, str(out_path2))
 
-    # --- STEP 3: Get average colors ---
+    # --- STEP 4: Get average colors ---
     avg_colors = get_average_colors(image, color_boxes)
-    # --- STEP 4: Find pH using different color spaces ---
+    
+    if not avg_colors:
+        print("[ERROR] No color boxes defined.")
+        return "NULL"
+
+    # --- STEP 5: Find pH using different color spaces ---
     avg_bgr, box_coords, roi = get_average_color_of_box(image, 750, 1100, 150, 300) # this is the box of pH strip
     
     if return_all_color_spaces:
@@ -590,19 +653,28 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
             # Interpolate or get closest
             if interpolate:
                 ph_value = interpolate_ph_from_distances(distances_dict)
-                results[color_space] = ph_value
+                if ph_value is None:
+                    print(f"[WARNING] Could not interpolate pH for {color_space}")
+                    results[color_space] = None
+                else:
+                    results[color_space] = ph_value
             else:
-                closest_ph = min(distances_dict, key=distances_dict.get)
-                results[color_space] = closest_ph
+                if distances_dict:
+                    closest_ph = min(distances_dict, key=distances_dict.get)
+                    results[color_space] = closest_ph
+                else:
+                    results[color_space] = None
             
             # Store minimum distance for reference
-            all_distances[color_space] = min(distances_dict.values())
-            
-            print(f"{color_space.upper()} color space: pH={results[color_space]}, min distance={all_distances[color_space]:.2f}")
+            if distances_dict:
+                all_distances[color_space] = min(distances_dict.values())
+                print(f"{color_space.upper()} color space: pH={results[color_space]}, min distance={all_distances[color_space]:.2f}")
+            else:
+                all_distances[color_space] = -1
         
         # Save highlighted image with RGB result (default)
         out_path3 = output_dir / f"{input_filename}_step3_highlighted_box.png"
-        highlight_and_label_box(image, box_coords, results['rgb'], str(out_path3), 
+        highlight_and_label_box(image, box_coords, results.get('rgb'), str(out_path3), 
                                color_boxes=color_boxes, detections=detections)
         
         results['distances'] = all_distances
@@ -619,16 +691,18 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
             distances_dict[entry['ph_text']] = dist
         
         # Interpolate or get closest
+        ph_result = None
         if interpolate:
             ph_result = interpolate_ph_from_distances(distances_dict)
         else:
-            ph_result = min(distances_dict, key=distances_dict.get)
+            if distances_dict:
+                ph_result = min(distances_dict, key=distances_dict.get)
         
         out_path3 = output_dir / f"{input_filename}_step3_highlighted_box.png"
         highlight_and_label_box(image, box_coords, ph_result, str(out_path3), 
                                color_boxes=color_boxes, detections=detections)
         
-        return ph_result if ph_result is not None else None
+        return ph_result if ph_result is not None else "NULL"
 
 
 def main():
