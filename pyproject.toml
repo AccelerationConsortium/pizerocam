@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pizerocam"
-version = "0.8.0"
+version = "0.9.0"
 description='Python utils package for self-driving labs'
 readme = "README.md"
 license = {file = "LICENSE"}

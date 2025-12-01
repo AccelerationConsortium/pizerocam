@@ -36,9 +36,178 @@ def detect_text_boxes(image_path):
         vertices = [(v.x, v.y) for v in text.bounding_poly.vertices]
         detections.append({
             'text': text.description,
-            'bbox': vertices
+            'bbox': vertices,
+            'confidence': getattr(text, 'confidence', 1.0)  # Store confidence if available
         })
     return image, detections
+
+def filter_valid_ph_detections(detections, image_shape, min_confidence=0.5):
+    """
+    Filter detections to keep only valid pH numbers (1-14) and remove duplicates.
+    
+    Args:
+        detections: List of detection dicts from Vision API
+        image_shape: (height, width, channels) of image for spatial filtering
+        min_confidence: Minimum confidence threshold (0.0 - 1.0)
+    
+    Returns:
+        Filtered list of detections
+    """
+    filtered = []
+    height, width = image_shape[:2]
+    
+    # Define expected region (top 70% of image for grid numbers, excluding bottom label area)
+    valid_y_max = int(height * 0.7)
+    
+    print(f"Filtering detections (image size: {width}x{height}, valid_y_max: {valid_y_max})...")
+    
+    for det in detections:
+        text = det['text']
+        bbox = det['bbox']
+        confidence = det.get('confidence', 1.0)
+        
+        # Calculate center for spatial checks
+        avg_y = np.mean([p[1] for p in bbox])
+        avg_x = np.mean([p[0] for p in bbox])
+        
+        # Filter 1: Must be numeric
+        if not text.isdigit():
+            print(f"  Rejected '{text}' - not a digit")
+            continue
+        
+        # Filter 2: Must be valid pH range (1-14)
+        try:
+            ph_val = int(text)
+            if ph_val < 1 or ph_val > 14:
+                print(f"  Rejected '{text}' - out of pH range (1-14)")
+                continue
+        except ValueError:
+            continue
+        
+        # Filter 3: Check confidence if available
+        if confidence < min_confidence:
+            print(f"  Rejected '{text}' - low confidence ({confidence:.2f})")
+            continue
+        
+        # Filter 4: Spatial filtering - reject if too low in image (likely labels, not grid numbers)
+        if avg_y > valid_y_max:
+            print(f"  Rejected '{text}' at y={avg_y:.0f} - below valid region ({valid_y_max})")
+            continue
+        
+        filtered.append(det)
+    
+    print(f"After basic filtering: {len(filtered)} detections (from {len(detections)} original)")
+    
+    # Filter 5: Remove spatial duplicates (same text in overlapping positions)
+    filtered = remove_duplicate_detections(filtered)
+    
+    return filtered
+
+def remove_duplicate_detections(detections, overlap_threshold=0.5):
+    """
+    Remove duplicate detections of the same text at overlapping positions.
+    
+    Uses IoU (Intersection over Union) to detect overlapping bounding boxes.
+    When duplicates found, keeps the one with higher confidence.
+    
+    Args:
+        detections: List of detection dicts
+        overlap_threshold: IoU threshold to consider boxes as duplicates (0.0 - 1.0)
+    
+    Returns:
+        Deduplicated list of detections
+    """
+    if len(detections) <= 1:
+        return detections
+    
+    def box_area(bbox):
+        """Calculate area of bounding box."""
+        x_coords = [p[0] for p in bbox]
+        y_coords = [p[1] for p in bbox]
+        width = max(x_coords) - min(x_coords)
+        height = max(y_coords) - min(y_coords)
+        return width * height
+    
+    def box_iou(bbox1, bbox2):
+        """Calculate Intersection over Union of two bounding boxes."""
+        x1_coords = [p[0] for p in bbox1]
+        y1_coords = [p[1] for p in bbox1]
+        x2_coords = [p[0] for p in bbox2]
+        y2_coords = [p[1] for p in bbox2]
+        
+        x1_min, x1_max = min(x1_coords), max(x1_coords)
+        y1_min, y1_max = min(y1_coords), max(y1_coords)
+        x2_min, x2_max = min(x2_coords), max(x2_coords)
+        y2_min, y2_max = min(y2_coords), max(y2_coords)
+        
+        # Calculate intersection
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+        
+        if inter_x_max < inter_x_min or inter_y_max < inter_y_min:
+            return 0.0  # No overlap
+        
+        inter_area = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+        
+        # Calculate union
+        area1 = box_area(bbox1)
+        area2 = box_area(bbox2)
+        union_area = area1 + area2 - inter_area
+        
+        if union_area == 0:
+            return 0.0
+        
+        return inter_area / union_area
+    
+    # Group detections by text
+    text_groups = {}
+    for det in detections:
+        text = det['text']
+        if text not in text_groups:
+            text_groups[text] = []
+        text_groups[text].append(det)
+    
+    deduplicated = []
+    duplicates_removed = 0
+    
+    # For each text group, remove overlapping duplicates
+    for text, group in text_groups.items():
+        if len(group) == 1:
+            deduplicated.append(group[0])
+            continue
+        
+        # Sort by confidence (highest first)
+        group_sorted = sorted(group, key=lambda d: d.get('confidence', 1.0), reverse=True)
+        
+        # Keep first (highest confidence), check others for overlap
+        kept = [group_sorted[0]]
+        
+        for det in group_sorted[1:]:
+            # Check if this detection overlaps with any kept detection
+            is_duplicate = False
+            for kept_det in kept:
+                iou = box_iou(det['bbox'], kept_det['bbox'])
+                if iou > overlap_threshold:
+                    is_duplicate = True
+                    duplicates_removed += 1
+                    bbox1 = det['bbox']
+                    bbox2 = kept_det['bbox']
+                    x1 = np.mean([p[0] for p in bbox1])
+                    x2 = np.mean([p[0] for p in bbox2])
+                    print(f"  Removed duplicate '{text}' - IoU={iou:.2f} (x1={x1:.0f}, x2={x2:.0f})")
+                    break
+            
+            if not is_duplicate:
+                kept.append(det)
+        
+        deduplicated.extend(kept)
+    
+    print(f"Removed {duplicates_removed} duplicate detection(s)")
+    print(f"Final count: {len(deduplicated)} detections")
+    
+    return deduplicated
 
 def draw_text_boxes(image, detections, out_path):
     """Draw bounding boxes and text labels on the image and save it."""
@@ -396,6 +565,10 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
     input_filename = Path(image_path).stem  # e.g., "capture_20250715-151115_200200200"
     
     image, detections = detect_text_boxes(image_path)
+    
+    # Filter out invalid and duplicate detections
+    detections = filter_valid_ph_detections(detections, image.shape, min_confidence=0.5)
+    
     # Compute average width of single-digit boxes
     single_digit_widths = [
         max([p[0] for p in det['bbox']]) - min([p[0] for p in det['bbox']])
@@ -480,10 +653,7 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
         highlight_and_label_box(image, box_coords, ph_result, str(out_path3), 
                                color_boxes=color_boxes, detections=detections)
         
-        if ph_result is not None:
-            return ph_result
-        else:
-            return None
+        return ph_result if ph_result is not None else None
 
 
 def main():
