@@ -163,7 +163,7 @@ class ImageReqClient:
             self.logger.error(f"Error receiving photo: {e}")
             return False, None
     
-    def analyze_photo(self, filepath, output_dir="same"):
+    def analyze_photo(self, filepath, output_dir="same", roi_config=None):
         """
         Analyze a photo for pH value using all three color spaces (RGB, LAB, HSV).
         
@@ -172,6 +172,8 @@ class ImageReqClient:
             output_dir (str): Directory to save annotated images. 
                              "same" = same folder as image (default)
                              None = ~/Pictures/pH_photos/
+            roi_config (dict, optional): Dict with keys 'ROI_X', 'ROI_Y', 'ROI_W', 'ROI_H' 
+                                        defining the pH strip location.
             
         Returns:
             dict: {'rgb': 7.3, 'lab': 7.1, 'hsv': 8.0, 'distances': {...}}
@@ -186,7 +188,8 @@ class ImageReqClient:
             ph_result = ph_from_image(filepath, 
                                      return_all_color_spaces=True,
                                      output_dir=output_dir,
-                                     interpolate=True)
+                                     interpolate=True,
+                                     roi_config=roi_config)
             
             if ph_result == "NULL":
                 self.logger.error("pH analysis failed")
@@ -213,7 +216,7 @@ class ImageReqClient:
             self.logger.error(f"Error analyzing photo: {e}")
             return "NULL"
     
-    def request_and_analyze_photo(self, output_dir="same"):
+    def request_and_analyze_photo(self, output_dir="same", roi_config=None):
         """
         Convenience method to request a photo and immediately analyze it.
         
@@ -221,6 +224,7 @@ class ImageReqClient:
             output_dir (str): Directory to save annotated images. 
                              "same" = same folder as image (default)
                              None = ~/Pictures/pH_photos/
+            roi_config (dict, optional): Dict with keys 'ROI_X', 'ROI_Y', 'ROI_W', 'ROI_H'
         
         Returns:
             tuple: (image_path: str or None, ph_result: dict or "NULL")
@@ -228,7 +232,7 @@ class ImageReqClient:
         """
         image_path = self.request_photo()
         if image_path:
-            ph_value = self.analyze_photo(image_path, output_dir=output_dir)
+            ph_value = self.analyze_photo(image_path, output_dir=output_dir, roi_config=roi_config)
             return image_path, ph_value
         else:
             return None, "NULL"

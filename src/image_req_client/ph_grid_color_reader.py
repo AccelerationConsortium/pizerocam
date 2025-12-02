@@ -585,7 +585,7 @@ def interpolate_ph_from_distances(distances):
     interpolated_ph = (ph1 * weight1 + ph2 * weight2) / total_weight
     return round(interpolated_ph, 1)
 
-def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, interpolate=True):
+def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, interpolate=True, roi_config=None):
     """
     Detect pH from color grid image.
     
@@ -596,6 +596,8 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
         output_dir: Directory to save annotated images. If None, saves to ~/Pictures/pH_photos/
                    If "same", saves to same directory as input image
         interpolate: If True, interpolates pH to 1 decimal place; if False, returns exact match
+        roi_config: Optional dict with keys 'ROI_X', 'ROI_Y', 'ROI_W', 'ROI_H' defining the pH strip location.
+                   If None, uses default hardcoded values.
     
     Returns:
         If return_all_color_spaces=False: pH value as string or float (e.g., "7" or 7.3)
@@ -614,6 +616,18 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
         output_dir = Path(output_dir)
     
     output_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Determine ROI for pH strip
+    if roi_config and all(k in roi_config for k in ['ROI_X', 'ROI_Y', 'ROI_W', 'ROI_H']):
+        roi_x = int(roi_config['ROI_X'])
+        roi_y = int(roi_config['ROI_Y'])
+        roi_w = int(roi_config['ROI_W'])
+        roi_h = int(roi_config['ROI_H'])
+        print(f"Using provided ROI for pH strip: X={roi_x}, Y={roi_y}, W={roi_w}, H={roi_h}")
+    else:
+        # Default hardcoded values
+        roi_x, roi_y, roi_w, roi_h = 750, 1100, 150, 300
+        print(f"[INFO] No custom ROI config provided. Using default pH strip ROI: X={roi_x}, Y={roi_y}, W={roi_w}, H={roi_h}")
     
     # Extract base filename without extension from input image
     input_filename = Path(image_path).stem  # e.g., "capture_20250715-151115_200200200"
@@ -659,7 +673,7 @@ def ph_from_image(image_path, return_all_color_spaces=False, output_dir=None, in
         return "NULL"
 
     # --- STEP 5: Find pH using different color spaces ---
-    avg_bgr, box_coords, roi = get_average_color_of_box(image, 750, 1100, 150, 300) # this is the box of pH strip
+    avg_bgr, box_coords, roi = get_average_color_of_box(image, roi_x, roi_y, roi_w, roi_h) # this is the box of pH strip
     
     if return_all_color_spaces:
         # Calculate pH for all three color spaces
