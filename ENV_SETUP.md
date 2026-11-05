@@ -129,11 +129,8 @@ Both modules automatically load credentials from the `.env` file using `python-d
 # Server port (default: 2222)
 SERVER_PORT=2222
 
-# Buffer size for socket communication (default: 2048)
-BUFFER_SIZE=2048
-
-# Chunk size for file transfer (default: 1024)
-CHUNK_SIZE=1024
+# Bearer token, if the PiCamera unit was started with --token (default: no auth)
+PIZEROCAM_TOKEN=change-me
 ```
 
 ### Tailscale IP Override (Optional)
@@ -168,8 +165,7 @@ GOOGLE_APPLICATION_CREDENTIALS="/Users/macbook_m2/credentials/pizerocam-vision-k
 
 # Server Configuration (optional)
 SERVER_PORT=2222
-BUFFER_SIZE=2048
-CHUNK_SIZE=1024
+# PIZEROCAM_TOKEN=change-me
 
 # Tailscale IP Override (optional)
 # PIZEROCAM_SERVER_IP="100.64.1.100"

@@ -1,3 +1,3 @@
-from .image_server import ImageServer
+from .image_server import ImageServer, CameraUnit
 
-__all__ = ['ImageServer']
+__all__ = ['ImageServer', 'CameraUnit']

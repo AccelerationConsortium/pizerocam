@@ -1,3 +1,15 @@
-BufferSize : 2048
-ChunkSize : 1024
-ServerPort : 2222
+# PiCamera unit settings (HTTP API)
+ServerPort: 2222
+
+# Still photo resolution preference: max, 4k, fhd, hd, vga (falls back to smaller if it fails)
+PhotoResolution: max
+# Seconds to wait after /photo?flash=true switches the light on, so auto-exposure/focus can settle
+PhotoSettleSeconds: 5
+
+# MJPEG video stream resolution [width, height]
+StreamSize: [1280, 720]
+
+# NeoPixel LED ring (data pin is fixed to board.D10 / SPI MOSI)
+LedCount: 12
+LightDefaultColor: [255, 255, 255]
+LightBrightness: 1.0

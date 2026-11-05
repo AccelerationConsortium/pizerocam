@@ -1,168 +1,152 @@
+import json
 import os
-import socket
+from datetime import datetime
 from pathlib import Path
-from time import sleep
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
+
 from dotenv import load_dotenv
 from logger import get_logger
-from socket_utils import connect_socket, send_file_name, receive_file_name
-from socket_utils import send_file_size, receive_file_size, receive_file
 
 from .ph_grid_color_reader import ph_from_image
 
 # Load environment variables from .env file
 load_dotenv()
 
-# Get settings from environment variables
-buffer_size = int(os.getenv("BUFFER_SIZE", 2048))
-chunk_size = int(os.getenv("CHUNK_SIZE", 1024))
 default_port = int(os.getenv("SERVER_PORT", 2222))
+default_token = os.getenv("PIZEROCAM_TOKEN") or None
 
 
 class ImageReqClient:
     """
-    A client for requesting images from the image server and analyzing them for pH values.
-    
-    This class provides a clean interface for:
-    - Connecting to an image server
-    - Requesting photos
-    - Analyzing photos for pH values (returns all three color spaces: RGB, LAB, HSV)
-    - Managing the connection lifecycle
+    HTTP client for the PiCamera unit.
+
+    - Take photos (optionally with the LED light as a flash)
+    - Turn the LED light on/off and change its color/brightness
+    - Get the live MJPEG stream URL
+    - Analyze photos locally for pH values (RGB, LAB, HSV)
     """
-    
-    def __init__(self, port=default_port, logger=None):
+
+    def __init__(self, port=default_port, logger=None, token=default_token, timeout=60):
         """
-        Initialize the ImageReqClient.
-        
         Args:
-            port (int): Server port to connect to
+            port (int): Server port
             logger: Optional logger instance
+            token (str): Bearer token, if the server was started with one
+            timeout (float): Request timeout in seconds
         """
         self.port = port
+        self.token = token
+        self.timeout = timeout
         self.server_ip = None
-        self.socket = None
         self.connected = False
         self.logger = logger or self._setup_logger()
-        
+
     @staticmethod
     def _setup_logger():
-        """Set up the logger for the client."""
         return get_logger("ImageReqClientLogger")
-    
+
+    @property
+    def base_url(self):
+        return f"http://{self.server_ip}:{self.port}"
+
+    def _request(self, method, path, params=None, body=None):
+        """Send a request; return (content_type, bytes, headers). Raises RuntimeError on failure."""
+        if not self.server_ip:
+            raise RuntimeError("Not connected to server. Call connect() first.")
+        url = self.base_url + path
+        if params:
+            url += "?" + urlencode(params)
+        headers = {}
+        data = None
+        if body is not None:
+            data = json.dumps(body).encode("utf-8")
+            headers["Content-Type"] = "application/json"
+        if self.token:
+            headers["Authorization"] = f"Bearer {self.token}"
+        req = Request(url, data=data, headers=headers, method=method)
+        try:
+            with urlopen(req, timeout=self.timeout) as resp:
+                return resp.headers.get("Content-Type", ""), resp.read(), resp.headers
+        except HTTPError as e:
+            try:
+                message = json.loads(e.read()).get("error", e.reason)
+            except ValueError:
+                message = e.reason
+            raise RuntimeError(f"{method} {path} failed ({e.code}): {message}")
+        except URLError as e:
+            raise RuntimeError(f"{method} {path} failed: {e.reason}")
+
+    def _json(self, method, path, params=None, body=None):
+        _, data, _ = self._request(method, path, params, body)
+        return json.loads(data)
+
     def connect(self, ip):
         """
-        Connect to the image server at the specified IP address.
-        
-        Args:
-            ip (str): IP address of the server
-            
+        Check that the unit at `ip` is reachable.
+
         Returns:
-            bool: True if connection successful, False otherwise
+            bool: True if the unit answered /status
         """
+        self.server_ip = ip
         try:
-            self.server_ip = ip
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket = connect_socket(self.socket, ip, self.port, self.logger)
-            
-            if self.socket is None:
-                self.logger.error(f"Failed to connect to server at {ip}:{self.port}")
-                return False
-                
+            status = self._json("GET", "/status")
             self.connected = True
-            self.logger.info(f"Successfully connected to server at {ip}:{self.port}")
+            self.logger.info(f"Connected to {status.get('device')} {status.get('version')} at {self.base_url}")
             return True
-            
         except Exception as e:
-            self.logger.error(f"Error connecting to server: {e}")
+            self.logger.error(f"Failed to connect to server at {ip}:{self.port}: {e}")
             self.connected = False
             return False
-    
+
     def disconnect(self):
-        """
-        Disconnect from the image server.
-        
-        Returns:
-            bool: True if disconnection successful, False otherwise
-        """
+        """HTTP is stateless; this just forgets the server address."""
+        self.connected = False
+        self.server_ip = None
+        return True
+
+    def status(self):
+        """Return the unit status dict, or None on failure."""
         try:
-            if self.socket:
-                self.socket.close()
-                self.socket = None
-            self.connected = False
-            self.server_ip = None
-            self.logger.info("Disconnected from server")
-            return True
-            
+            return self._json("GET", "/status")
         except Exception as e:
-            self.logger.error(f"Error disconnecting from server: {e}")
-            return False
-    
-    def request_photo(self):
-        """
-        Request a photo from the connected server.
-        
-        Returns:
-            str or None: Filepath of the received image, or None if failed
-        """
-        if not self.connected or not self.socket:
-            self.logger.error("Not connected to server. Call connect() first.")
+            self.logger.error(f"Error getting status: {e}")
             return None
-            
+
+    def stream_url(self):
+        """URL of the live MJPEG stream (open in a browser or cv2.VideoCapture)."""
+        url = f"{self.base_url}/stream"
+        return url + "?" + urlencode({"token": self.token}) if self.token else url
+
+    def request_photo(self, flash=False, settle=None, output_dir=None):
+        """
+        Take a photo on the unit and save it locally.
+
+        Args:
+            flash (bool): Turn the LED light on for the photo (then restore it)
+            settle (float): Seconds to wait before capturing (server default if None)
+            output_dir (str): Where to save (default: ~/Pictures/pizerocam)
+
+        Returns:
+            str or None: Path of the saved image, or None if failed
+        """
+        params = {"flash": "true" if flash else "false"}
+        if settle is not None:
+            params["settle"] = settle
         try:
-            # Send photo request
-            self.socket.sendall("TAKE_PHOTO".encode('utf-8'))
-            sleep(5)  # Wait for photo capture
-            
-            # Receive the photo
-            success, image_path = self._receive_photo()
-            
-            if success:
-                self.logger.info(f"Photo received and saved as {image_path}")
-                return image_path
-            else:
-                self.logger.error("Failed to receive complete photo")
-                return None
-                
+            _, data, headers = self._request("POST", "/photo", params)
+            filename = headers.get_filename() or f"capture_{datetime.now():%Y%m%d-%H%M%S}.jpg"
+            out_dir = Path(output_dir) if output_dir else Path.home() / "Pictures" / "pizerocam"
+            out_dir.mkdir(parents=True, exist_ok=True)
+            img_path = out_dir / Path(filename).name
+            img_path.write_bytes(data)
+            self.logger.info(f"Photo saved to {img_path} ({len(data)} bytes)")
+            return str(img_path)
         except Exception as e:
             self.logger.error(f"Error requesting photo: {e}")
             return None
-    
-    def _receive_photo(self):
-        """
-        Internal method to receive photo from server.
-        
-        Returns:
-            tuple: (success: bool, image_path: str)
-        """
-        try:
-            # Create the photos directory in ~/Pictures/pH_photos/
-            home_dir = Path.home()
-            output_dir = home_dir / "Pictures" / "pH_photos"
-            output_dir.mkdir(parents=True, exist_ok=True)
-            
-            # Receive the image name and echo back to confirm
-            img_name = receive_file_name(self.socket, self.logger)
-            self.logger.info(f"Server sent file name {img_name}.")
-            send_file_name(self.socket, img_name, self.logger)
-            self.logger.info("Echoed the file name back to server.")
-            img_path = output_dir / img_name
 
-            # Receive ASCII-based file size and echo back to confirm
-            file_size = receive_file_size(self.socket, self.logger)
-            self.logger.info(f"Server sent file size: {file_size} bytes.")
-            send_file_size(self.socket, file_size, self.logger)
-            self.logger.info("Echoed the file size back to server.")
-
-            # Now receive the actual file data in chunks, and write the file to disk
-            received_data = receive_file(self.socket, file_size, chunk_size, self.logger)
-            with open(img_path, "wb") as f:
-                f.write(received_data)
-            self.logger.info(f"File {img_name} saved to: {output_dir}")
-            return True, str(img_path)
-            
-        except Exception as e:
-            self.logger.error(f"Error receiving photo: {e}")
-            return False, None
-    
     def analyze_photo(self, filepath, output_dir="same", roi_config=None):
         """
         Analyze a photo for pH value using all three color spaces (RGB, LAB, HSV).
@@ -237,162 +221,104 @@ class ImageReqClient:
         else:
             return None, "NULL"
     
+    def light_on(self, color=None, brightness=None):
+        """Turn the light on, optionally with color (r, g, b) and brightness (0-1). Returns state or None."""
+        body = {}
+        if color is not None:
+            body["color"] = list(color)
+        if brightness is not None:
+            body["brightness"] = brightness
+        return self._light("/light/on", body)
+
+    def light_off(self):
+        """Turn the light off. Returns state or None."""
+        return self._light("/light/off", {})
+
+    def set_light(self, color=None, brightness=None):
+        """Change light color (r, g, b) and/or brightness (0-1) without switching it on or off.
+        Applied now if the light is on, else at the next light_on(). Returns state or None."""
+        body = {}
+        if color is not None:
+            body["color"] = list(color)
+        if brightness is not None:
+            body["brightness"] = brightness
+        return self._light("/light/color", body)
+
+    def set_light_color(self, r, g, b, brightness=None):
+        """Change light color. Returns state or None."""
+        return self.set_light((r, g, b), brightness)
+
+    def light_state(self):
+        try:
+            return self._json("GET", "/light")
+        except Exception as e:
+            self.logger.error(f"Error getting light state: {e}")
+            return None
+
+    def _light(self, path, body):
+        try:
+            state = self._json("POST", path, body=body)
+            self.logger.info(f"Light: {state}")
+            return state
+        except Exception as e:
+            self.logger.error(f"Light request {path} failed: {e}")
+            return None
+
     def change_led_color(self, r, g, b):
-        """
-        Change the LED color on the server.
-        
-        Args:
-            r (int): Red value (0-255)
-            g (int): Green value (0-255)
-            b (int): Blue value (0-255)
-            
-        Returns:
-            bool: True if color change successful, False otherwise
-        """
-        if not self.connected or not self.socket:
-            self.logger.error("Not connected to server. Call connect() first.")
-            return False
-            
-        try:
-            # Validate RGB values
-            if not all(0 <= val <= 255 for val in (r, g, b)):
-                self.logger.error("RGB values must be between 0-255")
-                return False
-            
-            # Send color change request
-            self.socket.sendall("CHANGE_COLOR".encode('utf-8'))
-            
-            # Wait for server's RGB request
-            response = self.socket.recv(buffer_size).decode('utf-8').strip()
-            
-            if response == "PLEASE SEND RGB":
-                # Send RGB values
-                self.socket.sendall(f"{r},{g},{b}".encode('utf-8'))
-                
-                # Get response from server
-                result = self.socket.recv(buffer_size).decode('utf-8').strip()
-                if result == "COLOR_CHANGED":
-                    self.logger.info(f"Successfully changed LED color to RGB({r},{g},{b})")
-                    return True
-                else:
-                    self.logger.error(f"Error changing color: {result}")
-                    return False
-            else:
-                self.logger.error(f"Unexpected server response: {response}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Error changing LED color: {e}")
-            return False
-    
-    def run_motor(self):
-        """
-        Run the motor on the server.
-        
-        Returns:
-            bool: True if motor run successful, False otherwise
-        """
-        if not self.connected or not self.socket:
-            self.logger.error("Not connected to server. Call connect() first.")
-            return False
-            
-        try:
-            self.socket.sendall("RUN_MOTOR".encode('utf-8'))
-            response = self.socket.recv(buffer_size).decode('utf-8').strip()
-            
-            if response == "MOTOR_RUN_COMPLETE":
-                self.logger.info("Motor run complete")
-                return True
-            else:
-                self.logger.error(f"Unexpected server response: {response}")
-                return False
-                
-        except Exception as e:
-            self.logger.error(f"Error running motor: {e}")
-            return False
-    
+        """Backward-compatible alias: set the light color. Returns True on success."""
+        return self.set_light_color(r, g, b) is not None
+
     def interactive_session(self):
-        """
-        Start an interactive terminal session for manual control.
-        Must be connected to server first.
-        """
+        """Interactive terminal session for manual control. Must be connected first."""
         if not self.connected:
             self.logger.error("Not connected to server. Call connect() first.")
             return
-        
-        print("\n" + "="*60)
-        print("Interactive PiZeroCam Session")
-        print("="*60)
-        
+
+        print("\n" + "=" * 60)
+        print("Interactive PiCamera Unit Session")
+        print(f"Live stream: {self.stream_url()}")
+        print("=" * 60)
+
         while True:
             print("\nOptions:")
-            print("  1. Request photo")
-            print("  2. Request photo and analyze pH")
-            print("  3. Change LED color")
-            print("  4. Run motor")
-            print("  5. Exit")
-            
-            choice = input("\nEnter your choice (1-5): ").strip()
-            
-            if choice == "1":
+            print("  1. Take photo")
+            print("  2. Take photo with flash")
+            print("  3. Light on")
+            print("  4. Light off")
+            print("  5. Change light color")
+            print("  6. Status")
+            print("  7. Exit")
+            choice = input("\nEnter your choice (1-7): ").strip()
+
+            if choice in ("1", "2"):
                 print("\nRequesting photo...")
-                image_path = self.request_photo()
-                if image_path:
-                    print(f"Photo saved to: {image_path}")
-                else:
-                    print("Failed to receive photo")
-                    
-            elif choice == "2":
-                print("\nRequesting photo and analyzing pH...")
-                image_path, ph_value = self.request_and_analyze_photo(
-                    return_all_color_spaces=True,
-                    output_dir="same",
-                    interpolate=True,
-                    print_results=True  # This will print the formatted results
-                )
-                if image_path:
-                    print(f"\n[INFO] Photo saved to: {image_path}")
-                    if ph_value != "NULL":
-                        # Results already printed by analyze_photo
-                        pass
-                    else:
-                        print("pH analysis failed")
-                else:
-                    print("Failed to receive photo")
-                    
+                path = self.request_photo(flash=(choice == "2"))
+                print(f"Photo saved to: {path}" if path else "Failed to take photo")
             elif choice == "3":
+                print(self.light_on())
+            elif choice == "4":
+                print(self.light_off())
+            elif choice == "5":
                 rgb_input = input("Enter RGB values (R,G,B): ").strip()
                 try:
-                    r, g, b = map(int, rgb_input.split(','))
-                    print(f"\nChanging LED to RGB({r},{g},{b})...")
-                    if self.change_led_color(r, g, b):
-                        print("LED color changed successfully!")
-                    else:
-                        print("Failed to change LED color")
+                    r, g, b = map(int, rgb_input.split(","))
                 except ValueError:
                     print("Invalid format. Use R,G,B (e.g., 255,0,0)")
-                    
-            elif choice == "4":
-                print("\nRunning motor...")
-                if self.run_motor():
-                    print("Motor run complete!")
-                else:
-                    print("Failed to run motor")
-                    
-            elif choice == "5":
+                    continue
+                print(self.set_light_color(r, g, b))
+            elif choice == "6":
+                print(json.dumps(self.status(), indent=2))
+            elif choice == "7":
                 print("\nExiting interactive session...")
                 break
-                
             else:
-                print("Invalid choice. Please enter 1-5.")
-    
+                print("Invalid choice. Please enter 1-7.")
+
     def __enter__(self):
-        """Context manager entry."""
         return self
-    
+
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit - automatically disconnect."""
         self.disconnect()
 
 
-__all__ = ['ImageReqClient'] 
+__all__ = ['ImageReqClient']
