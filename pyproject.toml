@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "pizerocam"
 version = "2.0.0"
-description='PiCamera unit (HTTP photo/stream/light server) and client for self-driving labs'
+description='PiCamera unit (STATUS_SPEC v1.2 snapshot/stream/light service) and client for self-driving labs'
 readme = "README.md"
 license = {file = "LICENSE"}
 requires-python = ">=3.11"
@@ -36,6 +36,15 @@ authors = [
 server = [
     "picamera2",
     "adafruit-circuitpython-neopixel",
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",
+]
+test = [
+    "fastapi>=0.110",
+    "httpx",
+    "pytest>=8",
+    "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",
 ]
 client = [
     "opencv-python>=4.5.0,<5.0.0",
@@ -63,7 +72,11 @@ packages = ["image_req_client", "image_server"]
 py-modules = ["logger"]
 
 [tool.setuptools.package-data]
-image_server = ["server_settings.yaml"]
+image_server = ["server_settings.yaml", "docs/*.md"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]

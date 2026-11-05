@@ -1,9 +1,11 @@
+import getpass
 import json
 import os
-from datetime import datetime
+import socket
+import threading
+import uuid
 from pathlib import Path
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -15,33 +17,38 @@ from .ph_grid_color_reader import ph_from_image
 load_dotenv()
 
 default_port = int(os.getenv("SERVER_PORT", 2222))
-default_token = os.getenv("PIZEROCAM_TOKEN") or None
+
+
+class DeviceError(RuntimeError):
+    """A refusal or failure reported by the unit (status + stable code)."""
+
+    def __init__(self, status, code, detail):
+        super().__init__(f"{status} {code or ''}: {detail}".strip())
+        self.status, self.code, self.detail = status, code, detail
 
 
 class ImageReqClient:
     """
-    HTTP client for the PiCamera unit.
+    Client for the PiCamera unit (STATUS_SPEC v1.2 service).
 
-    - Take photos (optionally with the LED light as a flash)
-    - Turn the LED light on/off and change its color/brightness
-    - Get the live MJPEG stream URL
-    - Analyze photos locally for pH values (RGB, LAB, HSV)
+    Every control action needs a claim. Calls made outside ``with client.control():``
+    claim, act and release on their own; inside it, one claim (kept alive by a
+    heartbeat thread) covers every call.
+
+    In the lab, workflows should drive the unit through the lab-skills SDK; this
+    client is for bench use and scripts on the unit's own network.
     """
 
-    def __init__(self, port=default_port, logger=None, token=default_token, timeout=60):
-        """
-        Args:
-            port (int): Server port
-            logger: Optional logger instance
-            token (str): Bearer token, if the server was started with one
-            timeout (float): Request timeout in seconds
-        """
+    def __init__(self, port=default_port, logger=None, timeout=30, owner=None):
         self.port = port
-        self.token = token
         self.timeout = timeout
+        self.owner = owner or f"{getpass.getuser()}@{socket.gethostname()}"
         self.server_ip = None
         self.connected = False
         self.logger = logger or self._setup_logger()
+        self._token = None
+        self._session_id = None
+        self._heartbeat_stop = None
 
     @staticmethod
     def _setup_logger():
@@ -51,49 +58,46 @@ class ImageReqClient:
     def base_url(self):
         return f"http://{self.server_ip}:{self.port}"
 
-    def _request(self, method, path, params=None, body=None):
-        """Send a request; return (content_type, bytes, headers). Raises RuntimeError on failure."""
+    # --- transport ---------------------------------------------------------------
+
+    def _request(self, method, path, body=None, token=None):
+        """Return (bytes, headers). Raises DeviceError on an HTTP error, RuntimeError if unreachable."""
         if not self.server_ip:
             raise RuntimeError("Not connected to server. Call connect() first.")
-        url = self.base_url + path
-        if params:
-            url += "?" + urlencode(params)
         headers = {}
         data = None
         if body is not None:
             data = json.dumps(body).encode("utf-8")
             headers["Content-Type"] = "application/json"
-        if self.token:
-            headers["Authorization"] = f"Bearer {self.token}"
-        req = Request(url, data=data, headers=headers, method=method)
+        if token:
+            headers["X-Claim-Token"] = token
+        req = Request(self.base_url + path, data=data, headers=headers, method=method)
         try:
             with urlopen(req, timeout=self.timeout) as resp:
-                return resp.headers.get("Content-Type", ""), resp.read(), resp.headers
+                return resp.read(), resp.headers
         except HTTPError as e:
             try:
-                message = json.loads(e.read()).get("error", e.reason)
+                payload = json.loads(e.read())
             except ValueError:
-                message = e.reason
-            raise RuntimeError(f"{method} {path} failed ({e.code}): {message}")
+                payload = {}
+            raise DeviceError(e.code, payload.get("code"), payload.get("detail", e.reason)) from None
         except URLError as e:
-            raise RuntimeError(f"{method} {path} failed: {e.reason}")
+            raise RuntimeError(f"{method} {path} failed: {e.reason}") from None
 
-    def _json(self, method, path, params=None, body=None):
-        _, data, _ = self._request(method, path, params, body)
-        return json.loads(data)
+    def _json(self, method, path, body=None, token=None):
+        data, _ = self._request(method, path, body, token)
+        return json.loads(data) if data else None
+
+    # --- connection & claims --------------------------------------------------------
 
     def connect(self, ip):
-        """
-        Check that the unit at `ip` is reachable.
-
-        Returns:
-            bool: True if the unit answered /status
-        """
+        """Check that the unit at `ip` answers. Returns True on success."""
         self.server_ip = ip
         try:
-            status = self._json("GET", "/status")
+            probe = self._json("GET", "/")
             self.connected = True
-            self.logger.info(f"Connected to {status.get('device')} {status.get('version')} at {self.base_url}")
+            self.logger.info(f"Connected to {probe['equipment_name']} ({probe['equipment_id']}, "
+                             f"protocol {probe['protocol_version']}) at {self.base_url}")
             return True
         except Exception as e:
             self.logger.error(f"Failed to connect to server at {ip}:{self.port}: {e}")
@@ -101,13 +105,72 @@ class ImageReqClient:
             return False
 
     def disconnect(self):
-        """HTTP is stateless; this just forgets the server address."""
+        self.release()
         self.connected = False
         self.server_ip = None
         return True
 
+    def claim(self, ttl_s=30.0):
+        """Acquire the unit's claim and keep it alive until release()."""
+        if self._token:
+            return
+        self._session_id = str(uuid.uuid4())
+        resp = self._json("POST", "/control/claim",
+                          {"owner": self.owner, "session_id": self._session_id, "ttl_s": ttl_s})
+        self._token = resp["claim_token"]
+        stop = self._heartbeat_stop = threading.Event()
+        interval = max(1.0, resp["heartbeat_interval_s"])
+
+        def beat():
+            while not stop.wait(interval):
+                try:
+                    self._request("POST", "/control/heartbeat", token=self._token)
+                except Exception as e:
+                    self.logger.error(f"Claim lost: {e}")
+                    self._token = None
+                    return
+
+        threading.Thread(target=beat, daemon=True).start()
+
+    def release(self):
+        """Release the claim (best effort). Releasing never changes the light."""
+        if self._heartbeat_stop:
+            self._heartbeat_stop.set()
+            self._heartbeat_stop = None
+        token, self._token = self._token, None
+        if token and self.server_ip:
+            try:
+                self._request("POST", "/control/release", token=token)
+            except Exception as e:
+                self.logger.warning(f"Release failed (the claim will expire): {e}")
+
+    def control(self, ttl_s=30.0):
+        """Context manager holding one claim for several actions."""
+        client = self
+
+        class _Claim:
+            def __enter__(self):
+                client.claim(ttl_s)
+                return client
+
+            def __exit__(self, *exc):
+                client.release()
+
+        return _Claim()
+
+    def _control(self, path, body):
+        if self._token:
+            return self._json("POST", path, body, token=self._token)
+        self.claim()
+        try:
+            return self._json("POST", path, body, token=self._token)
+        finally:
+            self.release()
+
+    # --- reads -------------------------------------------------------------------------
+
     def status(self):
-        """Return the unit status dict, or None on failure."""
+        """The unit's STATUS_SPEC envelope as a dict, or None on failure."""
         try:
             return self._json("GET", "/status")
         except Exception as e:
@@ -115,31 +178,32 @@ class ImageReqClient:
             return None
 
     def stream_url(self):
-        """URL of the live MJPEG stream (open in a browser or cv2.VideoCapture)."""
-        url = f"{self.base_url}/stream"
-        return url + "?" + urlencode({"token": self.token}) if self.token else url
+        """Direct MJPEG stream URL (bench use; the dashboard goes through its camera broker)."""
+        return f"{self.base_url}/stream"
+
+    # --- photos ------------------------------------------------------------------------
 
     def request_photo(self, flash=False, settle=None, output_dir=None):
         """
-        Take a photo on the unit and save it locally.
+        Take a photo on the unit and save a copy locally.
 
         Args:
-            flash (bool): Turn the LED light on for the photo (then restore it)
-            settle (float): Seconds to wait before capturing (server default if None)
+            flash (bool): Turn the light on for the photo (then switch it back off)
+            settle (float): Seconds to wait before capturing, 0-8 (server default if None)
             output_dir (str): Where to save (default: ~/Pictures/pizerocam)
 
         Returns:
             str or None: Path of the saved image, or None if failed
         """
-        params = {"flash": "true" if flash else "false"}
+        body = {"flash": bool(flash)}
         if settle is not None:
-            params["settle"] = settle
+            body["settle_s"] = settle
         try:
-            _, data, headers = self._request("POST", "/photo", params)
-            filename = headers.get_filename() or f"capture_{datetime.now():%Y%m%d-%H%M%S}.jpg"
+            snap = self._control("/control/snapshot", body)
+            data, _ = self._request("GET", snap["url"])
             out_dir = Path(output_dir) if output_dir else Path.home() / "Pictures" / "pizerocam"
             out_dir.mkdir(parents=True, exist_ok=True)
-            img_path = out_dir / Path(filename).name
+            img_path = out_dir / Path(snap["path"]).name
             img_path.write_bytes(data)
             self.logger.info(f"Photo saved to {img_path} ({len(data)} bytes)")
             return str(img_path)
@@ -221,52 +285,45 @@ class ImageReqClient:
         else:
             return None, "NULL"
     
+    # --- light -------------------------------------------------------------------------
+
     def light_on(self, color=None, brightness=None):
         """Turn the light on, optionally with color (r, g, b) and brightness (0-1). Returns state or None."""
-        body = {}
-        if color is not None:
-            body["color"] = list(color)
-        if brightness is not None:
-            body["brightness"] = brightness
-        return self._light("/light/on", body)
+        return self._light("/control/light/on", color, brightness)
 
     def light_off(self):
         """Turn the light off. Returns state or None."""
-        return self._light("/light/off", {})
+        return self._light("/control/light/off", None, None)
 
     def set_light(self, color=None, brightness=None):
         """Change light color (r, g, b) and/or brightness (0-1) without switching it on or off.
-        Applied now if the light is on, else at the next light_on(). Returns state or None."""
-        body = {}
-        if color is not None:
-            body["color"] = list(color)
-        if brightness is not None:
-            body["brightness"] = brightness
-        return self._light("/light/color", body)
+        Returns state or None."""
+        return self._light("/control/light/set", color, brightness)
 
     def set_light_color(self, r, g, b, brightness=None):
-        """Change light color. Returns state or None."""
         return self.set_light((r, g, b), brightness)
 
-    def light_state(self):
-        try:
-            return self._json("GET", "/light")
-        except Exception as e:
-            self.logger.error(f"Error getting light state: {e}")
-            return None
+    def change_led_color(self, r, g, b):
+        """Backward-compatible alias: set the light color. Returns True on success."""
+        return self.set_light_color(r, g, b) is not None
 
-    def _light(self, path, body):
+    def light_state(self):
+        status = self.status()
+        return (status or {}).get("details", {}).get("light")
+
+    def _light(self, path, color, brightness):
+        body = {}
+        if color is not None:
+            body["color"] = [int(v) for v in color]
+        if brightness is not None:
+            body["brightness"] = brightness
         try:
-            state = self._json("POST", path, body=body)
+            state = self._control(path, body)
             self.logger.info(f"Light: {state}")
             return state
         except Exception as e:
             self.logger.error(f"Light request {path} failed: {e}")
             return None
-
-    def change_led_color(self, r, g, b):
-        """Backward-compatible alias: set the light color. Returns True on success."""
-        return self.set_light_color(r, g, b) is not None
 
     def interactive_session(self):
         """Interactive terminal session for manual control. Must be connected first."""

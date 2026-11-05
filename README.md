@@ -1,72 +1,69 @@
 # PiZeroCam — PiCamera Unit
 
-A networked camera unit for self-driving labs, built on a Raspberry Pi Zero 2 W with a Pi Camera and a NeoPixel LED ring.
-It exposes a small HTTP API to:
+A networked camera unit for the AC Organic self-driving lab: a Raspberry Pi Zero 2 W with a Pi Camera
+and a 12-pixel NeoPixel light ring. It serves:
 
-- **take photos** at full sensor resolution (optionally using the light as a flash)
-- **stream live video** (MJPEG — opens directly in a browser, OpenCV, or any MJPEG viewer)
-- **turn the light on/off** and **change its color and brightness**
+- **snapshots** at full sensor resolution (optionally using the light as a flash)
+- a **live MJPEG video stream**
+- **light control**: on/off, color and brightness
 
-It also ships a Python client/CLI, and optional client-side tools for analyzing pH test-strip photos.
+**This repo conforms to lab status spec v1.2**
+([`ac-organic-lab/docs/STATUS_SPEC.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/STATUS_SPEC.md)),
+including v1.1 claims with hard enforcement. On the LLE dashboard it is the **Camera Unit (LLE)**
+(`lle_camera_unit`).
 
 ## Architecture
 
-- **`image_server`** runs on the Pi: HTTP server + camera + LED ring.
-- **`image_req_client`** runs on any computer: a thin HTTP client (stdlib only) plus optional photo-analysis tools.
+- **`image_server`** runs on the Pi: a FastAPI service over the camera and light.
+- **`image_req_client`** runs on any computer: a small HTTP client and CLI for bench use, plus optional
+  pH test-strip analysis tools. In the lab, workflows drive the unit through the `lab-skills` SDK instead.
 
-The server listens on port **2222** by default and automatically reports its Tailscale IP (100.x.x.x) when available, so the unit can be reached securely from anywhere on your tailnet.
+## HTTP API (port 2222)
 
-## HTTP API
-
-| Method | Endpoint | Description |
+| Method | Path | Description |
 |---|---|---|
-| GET | `/` | Browser control page (live stream, photo, light controls) |
-| GET | `/status` | Unit status: camera, light, stream (JSON) |
-| GET / POST | `/photo` | Take a photo → `image/jpeg` |
-| GET | `/stream` | Live MJPEG video (`multipart/x-mixed-replace`) |
-| GET | `/light` | Light state `{"on", "color", "brightness"}` |
-| POST | `/light/on` | Turn light on. Optional `color`, `brightness` |
-| POST | `/light/off` | Turn light off |
-| POST | `/light/color` | Change `color` and/or `brightness` without switching on/off |
+| GET | `/` | Probe: `{equipment_id, equipment_name, protocol_version}` |
+| GET | `/health` | Process liveness |
+| GET | `/status` | STATUS_SPEC v1.2 envelope (side-effect-free) |
+| GET | `/stream` | Live MJPEG (`multipart/x-mixed-replace`) |
+| GET | `/media` | Stored snapshots, newest first |
+| GET | `/media/snapshots/main/<name>` | One stored snapshot (JPEG) |
+| POST | `/control/claim` | Acquire the claim: `{owner, session_id, ttl_s}` → `{claim_token, heartbeat_interval_s, expires_at}` |
+| POST | `/control/heartbeat` | Keep the claim alive (`X-Claim-Token`) |
+| POST | `/control/release` | Release the claim (idempotent) |
+| POST | `/control/snapshot` | Take a photo: `{flash?, settle_s?}` → `{path, url, taken_at, lens, width, height, bytes}` |
+| POST | `/control/light/on` | `{color?: [r,g,b], brightness?: 0–1}` |
+| POST | `/control/light/off` | |
+| POST | `/control/light/set` | Change `color` and/or `brightness` without switching on/off |
+| GET | `/docs`, `/openapi.json`, `/agent-docs`, `/llms.txt` | Documentation (EQUIP_GUIDE Step B3) |
 
-**`/photo` parameters** (query string):
-- `flash=true` — switch the light on for the photo, then restore it (default `false`: photo uses the light as it currently is)
-- `settle=<seconds>` — wait before capturing (0–30). Defaults to `PhotoSettleSeconds` (5 s) when `flash` switched the light on, otherwise 0
+Every `/control/*` action except `claim` requires a live `X-Claim-Token` and returns **423** without one.
+Claims only serialize control: **releasing or losing a claim changes no hardware state** (the light stays as
+it is). The full operating semantics are in [`src/image_server/docs/AGENT_GUIDE.md`](src/image_server/docs/AGENT_GUIDE.md),
+also served at `/agent-docs`.
 
-**Light parameters** can be a JSON body or query parameters:
-- `color`: `[r, g, b]`, `"r,g,b"` or `"#rrggbb"` (0–255 each)
-- `brightness`: `0.0`–`1.0`
+### Status semantics
 
-Errors are returned as JSON `{"error": "..."}` with status 400 (bad parameter), 401 (bad token), 404/405, or 503 (camera/light not available).
-
-### Examples
-
-```bash
-UNIT=http://100.64.1.100:2222
-
-curl $UNIT/status
-curl -o photo.jpg "$UNIT/photo"
-curl -o photo.jpg "$UNIT/photo?flash=true&settle=3"
-curl -X POST $UNIT/light/on -H 'Content-Type: application/json' -d '{"color": [255, 0, 0], "brightness": 0.5}'
-curl -X POST "$UNIT/light/color?color=%2300ff00"
-curl -X POST $UNIT/light/off
-```
-
-Open `$UNIT/` in a browser for the control page, or `$UNIT/stream` for just the video. With OpenCV:
-
-```python
-import cv2
-cap = cv2.VideoCapture("http://100.64.1.100:2222/stream")
-ok, frame = cap.read()
-```
-
-The stream runs only while at least one viewer is connected. Taking a photo pauses the stream briefly while the camera switches to full resolution.
+- **Primary operation (§2.3):** acquiring a still photo. `activity` is `running` from the moment a
+  snapshot is accepted until the JPEG is stored, otherwise `idle`. Streaming and the light are reported in
+  `components.camera` / `components.light`, not as activity. `metrics.cycles_total` counts snapshots.
+- `equipment_status`: `ready`; `busy` while capturing; `degraded` when the light failed or is disabled
+  (photos without flash still work) or the camera is disabled on purpose; `error` when the camera failed to
+  initialize; `dry_run` with both parts disabled.
+- `allowed_actions`: `pizerocam.snapshot` (camera up and idle), `pizerocam.light.on` / `.off` / `.set`
+  (light up).
+- Refusals: 409 `camera_unavailable` / `light_unavailable` / `capture_in_progress` / `claimed`, 422
+  `invalid_request`, 423 `claim_required`. There are no §6 preconditions, so no 412s.
+- `last_error.code` taxonomy: `capture_failed`, `light_write_failed`. Cleared by the next successful
+  control action; refusals never set it.
+- Hardware is initialized once at start; there is no startup/shutdown action.
+- Snapshots stay on the Pi (default `~/pizerocam-media`, newest 200 kept). The unit is not a record
+  store; copy anything that matters to BitacoraDB.
 
 ### Authentication
 
-By default the API is open to anyone who can reach the port (keep it on Tailscale or a trusted LAN).
-To require a token, start the server with `--token <secret>` or set `PIZEROCAM_TOKEN`; clients then send
-`Authorization: Bearer <secret>` or `?token=<secret>` (handy for the browser page and stream URL).
+None in the service (STATUS_SPEC best practice 11). Tailnet ACLs and the dashboard edge gate access, and
+the dashboard decides who may control the unit. Do not expose port 2222 beyond the tailnet.
 
 ## Installation
 
@@ -83,148 +80,79 @@ python3 -m venv venv --system-site-packages   # needed to see the apt-installed 
 source venv/bin/activate
 pip install ".[server]"
 
-pizerocam-server
+pizerocam-server             # http://<pi>:2222/docs
 ```
 
-Requires Python 3.11+ (Raspberry Pi OS Bookworm or newer).
-
-#### Tailscale
+Requires Python 3.11+ (Raspberry Pi OS Bookworm or newer). For running it as a service on a lab device,
+follow [`ac-organic-lab/docs/DEVICE_PC_SETUP.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/DEVICE_PC_SETUP.md).
 
 ```bash
-curl -fsSL https://tailscale.com/install.sh | sh
-sudo tailscale up
-pizerocam-server                      # logs http://100.x.x.x:2222/
-PIZEROCAM_SERVER_IP=100.64.1.100 pizerocam-server   # force the reported IP
+pizerocam-server --port 2222 --resolution fhd       # still resolution: max, 4k, fhd, hd, vga
+pizerocam-server --media-dir /data/pizerocam        # where snapshots are kept
+pizerocam-server --no-camera --no-light             # no hardware (dry_run)
 ```
+
+If the camera or light fails to initialize, the service still starts and `/status` reports why
+(`error` or `degraded`). Settings live in `src/image_server/server_settings.yaml`
+(equipment id/name, port, resolutions, settle time, media cap, LED defaults). Set
+`PIZEROCAM_CORS_ORIGINS` (comma-separated) to allow the dashboard origin in browsers.
 
 ### Client (on your computer)
 
 ```bash
 pip install -e ".[client]"            # client + pH analysis tools
-pip install -e .                      # client only (no analysis dependencies)
+pip install -e .                      # client only
 ```
 
-## Usage
-
-### Server CLI
+## Client usage (bench / scripts)
 
 ```bash
-pizerocam-server                          # port from server_settings.yaml (2222)
-pizerocam-server --port 8080
-pizerocam-server --resolution fhd         # still resolution: max, 4k, fhd, hd, vga
-pizerocam-server --token s3cret           # require a bearer token
-pizerocam-server --no-camera --no-light   # no hardware (testing)
+pizerocam-client --ip 100.64.254.98                          # interactive session
+pizerocam-client --ip 100.64.254.98 --photo --flash          # saved to ~/Pictures/pizerocam
+pizerocam-client --ip 100.64.254.98 --light on --color 255,0,0 --brightness 0.5
+pizerocam-client --ip 100.64.254.98 --light off
+pizerocam-client --ip 100.64.254.98 --status
 ```
-
-If the camera or light fails to initialize, the server still starts; the affected endpoints return 503 and `/status` shows the error.
-
-### Server settings
-
-`src/image_server/server_settings.yaml`:
-
-```yaml
-ServerPort: 2222
-PhotoResolution: max          # max, 4k, fhd, hd, vga (falls back to smaller sizes)
-PhotoSettleSeconds: 5         # wait after flash turns the light on
-StreamSize: [1280, 720]       # MJPEG stream resolution
-LedCount: 12
-LightDefaultColor: [255, 255, 255]
-LightBrightness: 1.0
-```
-
-### Client CLI
-
-```bash
-pizerocam-client --ip 100.64.1.100                          # interactive session
-pizerocam-client --ip 100.64.1.100 --photo                  # saved to ~/Pictures/pizerocam
-pizerocam-client --ip 100.64.1.100 --photo --flash
-pizerocam-client --ip 100.64.1.100 --light on --color 255,0,0 --brightness 0.5
-pizerocam-client --ip 100.64.1.100 --color 0,0,255          # change color only
-pizerocam-client --ip 100.64.1.100 --light off
-pizerocam-client --ip 100.64.1.100 --status --stream-url
-```
-
-### Python client
 
 ```python
 from image_req_client import ImageReqClient
 
-client = ImageReqClient(port=2222)            # token=... if the server requires one
-client.connect("100.64.1.100")
+client = ImageReqClient(port=2222)
+client.connect("100.64.254.98")
+path = client.request_photo(flash=True)   # claims, captures, releases
 
-client.light_on(color=(255, 255, 255), brightness=0.8)
-path = client.request_photo()                 # or request_photo(flash=True, settle=3)
-client.set_light_color(0, 0, 255)
-client.light_off()
-print(client.status())
-print(client.stream_url())
-```
-
-### Python server
-
-```python
-from image_server import ImageServer
-
-server = ImageServer(port=2222, resolution="fhd")
-server.start(background=False)                # blocks; Ctrl+C to stop
-
-# or in the background
-with ImageServer() as server:
-    print(server.get_ip_address(), server.port)
-    ...
+with client.control():                    # one claim, heartbeated, for several actions
+    client.light_on(color=(255, 255, 255), brightness=0.8)
+    client.request_photo()
+    client.light_off()
 ```
 
 ## Hardware
 
 - Raspberry Pi Zero 2 W/WH
-- Pi Camera Module 3 (autofocus is set to continuous when supported)
-- 12-pixel NeoPixel ring on **GPIO10 / board.D10 (SPI MOSI)** — this pin is required
-- Optional: PiSugar UPS
+- Pi Camera Module 3 (autofocus set to continuous when supported)
+- 12-pixel NeoPixel ring on **GPIO10 / board.D10 (SPI MOSI)** (this pin is required)
 
-## Troubleshooting
+## Development
 
-- **`Cannot allocate memory` from the camera** — the server tries smaller still resolutions automatically; you can also pass `--resolution fhd` or lower `StreamSize`.
-- **Light fails to initialize** — check SPI is enabled, the ring is on D10, its power supply, and that your user can access GPIO/SPI.
-- **Wrong IP reported** — check `tailscale ip -4`, or set `PIZEROCAM_SERVER_IP`.
+```bash
+uv run --extra test pytest
+```
+
+Tests use a fake camera and light; `tests/fixtures/status_*.json` are STATUS_SPEC snapshot fixtures
+(ready, ready with claim, busy, degraded, degraded + running, error, dry_run, cleared/active `last_error`),
+each checked with `sdl_lab_contract.check_consistency`.
 
 ## Optional: pH test-strip analysis (client side)
 
-The `client` extra includes tools that analyze a captured photo of a pH test strip using RGB, LAB and HSV color spaces
-(Google Cloud Vision OCR for the reference grid, interpolated to one decimal place):
+The `client` extra includes tools that analyze a captured photo of a pH test strip in RGB, LAB and HSV
+(Google Cloud Vision OCR for the reference grid). See `examples/` and `ENV_SETUP.md`.
 
 ```python
 path = client.request_photo(flash=True)
 result = client.analyze_photo(path, roi_config={"ROI_X": 750, "ROI_Y": 1100, "ROI_W": 150, "ROI_H": 300})
-# {'rgb': 7.3, 'lab': 7.1, 'hsv': 8.0, 'distances': {...}}
-```
-
-Requires `GOOGLE_APPLICATION_CREDENTIALS` (see `ENV_SETUP.md`). See `examples/` for more.
-
-## Project structure
-
-```
-pizerocam/
-├── src/
-│   ├── image_server/
-│   │   ├── image_server.py       # HTTP API, CameraUnit, ImageServer
-│   │   ├── hardware.py           # Camera (stills + MJPEG) and Light (NeoPixel)
-│   │   ├── network.py            # Tailscale / LAN IP detection
-│   │   ├── server_settings.yaml
-│   │   └── cli.py                # pizerocam-server
-│   ├── image_req_client/
-│   │   ├── image_req_client.py   # HTTP client
-│   │   ├── ph_grid_color_reader.py, simple_photo_analyzer.py, photo_analyzer.py
-│   │   └── cli.py                # pizerocam-client
-│   └── logger.py
-├── examples/
-└── pyproject.toml
 ```
 
 ## License
 
 MIT License — see LICENSE.
-
-## Support
-
-- GitHub Issues: https://github.com/AccelerationConsortium/pizerocam/issues
-- Email: cyrilcaoyang@gmail.com

@@ -126,18 +126,8 @@ Both modules automatically load credentials from the `.env` file using `python-d
 ### Server Configuration (Optional)
 
 ```bash
-# Server port (default: 2222)
+# Port the client connects to (default: 2222)
 SERVER_PORT=2222
-
-# Bearer token, if the PiCamera unit was started with --token (default: no auth)
-PIZEROCAM_TOKEN=change-me
-```
-
-### Tailscale IP Override (Optional)
-
-```bash
-# Force specific server IP (useful for Tailscale)
-PIZEROCAM_SERVER_IP="100.64.1.100"
 ```
 
 ## Security Best Practices
@@ -165,10 +155,6 @@ GOOGLE_APPLICATION_CREDENTIALS="/Users/macbook_m2/credentials/pizerocam-vision-k
 
 # Server Configuration (optional)
 SERVER_PORT=2222
-# PIZEROCAM_TOKEN=change-me
-
-# Tailscale IP Override (optional)
-# PIZEROCAM_SERVER_IP="100.64.1.100"
 ```
 
 Save this as `.env` in your project root and update the paths accordingly.

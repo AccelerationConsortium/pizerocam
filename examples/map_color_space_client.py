@@ -16,14 +16,15 @@ def color_mapping_session(client, interval, settle=2.0):
         raise ValueError("interval must be a power of 2 between 2 and 256")
     out_dir = Path.home() / "Pictures" / "pizerocam" / "color-mapping"
     levels = range(interval - 1, 256, interval)
-    for r in levels:
-        for g in levels:
-            for b in levels:
-                if client.light_on(color=(r, g, b)) is None:
-                    return
-                path = client.request_photo(settle=settle, output_dir=out_dir / f"{r:03d}{g:03d}{b:03d}")
-                print(f"({r},{g},{b}) -> {path}")
-    client.light_off()
+    with client.control():  # one claim for the whole sweep
+        for r in levels:
+            for g in levels:
+                for b in levels:
+                    if client.light_on(color=(r, g, b)) is None:
+                        return
+                    path = client.request_photo(settle=settle, output_dir=out_dir / f"{r:03d}{g:03d}{b:03d}")
+                    print(f"({r},{g},{b}) -> {path}")
+        client.light_off()
 
 
 if __name__ == "__main__":

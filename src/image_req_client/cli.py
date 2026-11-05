@@ -7,7 +7,7 @@ import argparse
 import json
 import sys
 
-from .image_req_client import ImageReqClient, default_port, default_token
+from .image_req_client import ImageReqClient, default_port
 
 
 def _rgb(text):
@@ -35,7 +35,6 @@ Examples:
     )
     parser.add_argument("--ip", required=True, help="IP address of the PiCamera unit")
     parser.add_argument("--port", type=int, default=default_port, help=f"Server port (default: {default_port})")
-    parser.add_argument("--token", default=default_token, help="Bearer token (default: $PIZEROCAM_TOKEN)")
     parser.add_argument("--photo", action="store_true", help="Take a photo and save it locally")
     parser.add_argument("--flash", action="store_true", help="Use the light as a flash for --photo")
     parser.add_argument("--output-dir", help="Where to save photos (default: ~/Pictures/pizerocam)")
@@ -49,7 +48,7 @@ Examples:
     args = parser.parse_args()
     color = args.color or args.led
 
-    client = ImageReqClient(port=args.port, token=args.token)
+    client = ImageReqClient(port=args.port)
     print(f"Connecting to http://{args.ip}:{args.port} ...")
     if not client.connect(args.ip):
         print("Failed to connect to server")
