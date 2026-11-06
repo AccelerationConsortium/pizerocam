@@ -36,12 +36,14 @@ authors = [
 server = [
     "picamera2",
     "adafruit-circuitpython-neopixel",
+    "rpi_ws281x>=4.0.0; platform_system == 'Linux' and platform_machine == 'aarch64'",  # NeoPixel backend on the Pi
     "fastapi>=0.110",
     "uvicorn>=0.29",
     "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",
 ]
 test = [
     "fastapi>=0.110",
+    "uvicorn>=0.29",
     "httpx",
     "pytest>=8",
     "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",

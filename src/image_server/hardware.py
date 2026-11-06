@@ -10,13 +10,20 @@ import threading
 import time
 
 
-class _FrameBuffer:
-    """File-like sink for the MJPEG encoder; hands the latest frame to stream viewers."""
+class _FrameBuffer(io.BufferedIOBase):
+    """
+    File-like sink for the MJPEG encoder; hands the latest frame to stream viewers.
+    picamera2's FileOutput accepts only an io.BufferedIOBase.
+    """
 
     def __init__(self):
+        super().__init__()
         self._cond = threading.Condition()
         self._frame = None
         self._seq = 0
+
+    def writable(self):
+        return True
 
     def write(self, buf):
         with self._cond:
@@ -156,10 +163,10 @@ class Camera:
     def open_stream(self):
         """Register a stream viewer; starts the encoder for the first one."""
         with self._lock:
-            self._viewers += 1
             if not self._encoder_running:
                 self._start_encoder()
                 self.logger.info("Video stream started")
+            self._viewers += 1  # only once the encoder is running, so a failed start leaks no viewer
 
     def close_stream(self):
         """Unregister a stream viewer; stops the encoder after the last one leaves."""
