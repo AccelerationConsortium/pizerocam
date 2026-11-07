@@ -1,159 +1,39 @@
 #!/usr/bin/env python3
-"""
-Command-line interface for the ImageServer.
-"""
+"""Command-line entry point: run the PiCamera unit service with uvicorn."""
 
 import argparse
-import sys
-import signal
-from .image_server import ImageServer
+import logging
 
-
-def signal_handler(signum, frame):
-    """Handle shutdown signals gracefully."""
-    print("\nShutting down server...")
-    sys.exit(0)
+from .service import load_settings
 
 
 def main_server():
-    """Main entry point for the server CLI."""
+    settings = load_settings()
     parser = argparse.ArgumentParser(
-        description="PiZeroCam Image Server",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Start server with automatic Tailscale detection
-  pizerocam-server
-  
-  # Start server with maximum resolution (4608x2592)
-  pizerocam-server --resolution max
-  
-  # Start server with Full HD resolution
-  pizerocam-server --resolution fhd
-  
-  # Start server with motor disabled (if PCA9685 not available)
-  pizerocam-server --no-motor
-  
-  # Start server with no hardware (testing mode)
-  pizerocam-server --no-camera --no-motor
-  
-  # Start server on specific port
-  pizerocam-server --port 3333
-  
-  # Start server on specific interface
-  pizerocam-server --host 192.168.1.100
-  
-  # Force specific Tailscale IP
-  PIZEROCAM_SERVER_IP=100.x.x.x pizerocam-server
-        """
+        description="PiCamera unit: STATUS_SPEC v1.2 service for snapshots, MJPEG stream and LED light",
+        epilog="Docs at http://<host>:<port>/docs and /agent-docs once running.",
     )
-    
-    parser.add_argument(
-        "--host", 
-        default="0.0.0.0",
-        help="Host interface to bind to (default: 0.0.0.0)"
-    )
-    
-    parser.add_argument(
-        "--port", 
-        type=int, 
-        default=2222,
-        help="Port to listen on (default: 2222)"
-    )
-    
-    parser.add_argument(
-        "--verbose", 
-        action="store_true",
-        help="Enable verbose logging"
-    )
-    
-    parser.add_argument(
-        "--no-camera",
-        action="store_true", 
-        help="Disable camera initialization"
-    )
-    
-    parser.add_argument(
-        "--no-motor",
-        action="store_true",
-        help="Disable motor initialization"
-    )
-    
-    parser.add_argument(
-        "--resolution",
-        choices=["max", "4k", "fhd", "hd", "vga"],
-        help="Camera resolution (max=4608x2592, 4k=3840x2160, fhd=1920x1080, hd=1280x720, vga=640x480)"
-    )
-    
+    parser.add_argument("--host", default="0.0.0.0", help="Interface to bind to (default: 0.0.0.0)")
+    parser.add_argument("--port", type=int, default=settings["ServerPort"],
+                        help=f"Port to listen on (default: {settings['ServerPort']})")
+    parser.add_argument("--resolution", choices=["max", "4k", "fhd", "hd", "vga"],
+                        help="Still photo resolution (default: PhotoResolution in server_settings.yaml)")
+    parser.add_argument("--media-dir", help=f"Where snapshots are stored (default: {settings['MediaDir']})")
+    parser.add_argument("--no-camera", action="store_true", help="Do not initialize the camera")
+    parser.add_argument("--no-light", action="store_true", help="Do not initialize the LED ring")
     args = parser.parse_args()
-    
-    # Set up signal handlers for graceful shutdown
-    signal.signal(signal.SIGINT, signal_handler)
-    signal.signal(signal.SIGTERM, signal_handler)
-    
-    # Determine hardware initialization based on arguments
-    init_camera = not args.no_camera
-    init_motor = not args.no_motor
-    
-    # Create and start server with fallback for hardware issues
-    if init_camera and init_motor:
-        try:
-            server = ImageServer(host=args.host, port=args.port, init_camera=True, init_motor=True, resolution=args.resolution)
-            print("✓ Server created with full hardware support")
-        except Exception as e:
-            print(f"⚠ Full hardware initialization failed: {e}")
-            print("Trying with motor disabled...")
-            try:
-                server = ImageServer(host=args.host, port=args.port, init_camera=True, init_motor=False, resolution=args.resolution)
-                print("✓ Server created with camera only (motor disabled)")
-            except Exception as e2:
-                print(f"⚠ Camera initialization failed: {e2}")
-                print("Trying with minimal configuration...")
-                server = ImageServer(host=args.host, port=args.port, init_camera=False, init_motor=False, resolution=args.resolution)
-                print("✓ Server created with minimal configuration (no hardware)")
-    else:
-        # User explicitly disabled some hardware
-        try:
-            server = ImageServer(host=args.host, port=args.port, init_camera=init_camera, init_motor=init_motor, resolution=args.resolution)
-            hw_status = []
-            if init_camera: 
-                hw_status.append("camera")
-                if args.resolution:
-                    hw_status.append(f"@{args.resolution}")
-            if init_motor: hw_status.append("motor") 
-            if not hw_status: hw_status.append("no hardware")
-            print(f"✓ Server created with: {', '.join(hw_status)}")
-        except Exception as e:
-            print(f"⚠ Server initialization failed: {e}")
-            print("Falling back to minimal configuration...")
-            server = ImageServer(host=args.host, port=args.port, init_camera=False, init_motor=False, resolution=args.resolution)
-            print("✓ Server created with minimal configuration (no hardware)")
-    
-    try:
-        print(f"Starting PiZeroCam Image Server...")
-        print(f"Host: {args.host}")
-        print(f"Port: {args.port}")
-        print(f"Server IP: {server.get_ip_address()}")
-        print("Press Ctrl+C to stop the server")
-        print("-" * 40)
-        
-        # Start server in blocking mode
-        if server.start(background=False):
-            print("Server started successfully")
-        else:
-            print("Failed to start server")
-            sys.exit(1)
-            
-    except KeyboardInterrupt:
-        print("\nReceived interrupt signal")
-    except Exception as e:
-        print(f"Server error: {e}")
-        sys.exit(1)
-    finally:
-        print("Stopping server...")
-        server.stop()
-        print("Server stopped")
+
+    if args.media_dir:
+        settings["MediaDir"] = args.media_dir
+    logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+    import uvicorn
+    from .app import build_service, create_app
+
+    app = create_app(lambda: build_service(settings, init_camera=not args.no_camera,
+                                           init_light=not args.no_light, resolution=args.resolution))
+    uvicorn.run(app, host=args.host, port=args.port, timeout_keep_alive=5)
 
 
 if __name__ == "__main__":
-    main_server() 
+    main_server()

@@ -1,0 +1,94 @@
+{
+  "protocol_version": "1.2",
+  "equipment_id": "lle_camera_unit",
+  "equipment_name": "PiZeroCam Service",
+  "equipment_kind": "other",
+  "equipment_version": "2.0.0",
+  "host": "sdl2-pi0-lle-pizerocam",
+  "equipment_status": "ready",
+  "message": null,
+  "required_actions": [],
+  "allowed_actions": [
+    "pizerocam.snapshot",
+    "pizerocam.light.on",
+    "pizerocam.light.off",
+    "pizerocam.light.set"
+  ],
+  "activity": "idle",
+  "activity_since": "2026-11-05T23:07:10.524051Z",
+  "device_time": "2026-11-05T23:07:10.525930Z",
+  "uptime_seconds": 0.1,
+  "components": {
+    "camera": {
+      "connected": true,
+      "state": "idle",
+      "message": null,
+      "last_event_at": null
+    },
+    "light": {
+      "connected": true,
+      "state": "on",
+      "message": "rgb(255,255,255) at 80%",
+      "last_event_at": null
+    }
+  },
+  "metrics": {
+    "cycles_total": {
+      "value": 2,
+      "unit": "count",
+      "timestamp": null
+    },
+    "stream_viewers": {
+      "value": 0,
+      "unit": "count",
+      "timestamp": null
+    }
+  },
+  "last_error": {
+    "code": "capture_failed",
+    "message": "snapshot failed: sensor timeout",
+    "severity": "error",
+    "timestamp": "2026-11-05T23:07:10.523973Z"
+  },
+  "details": {
+    "claimed_by": {
+      "session_id": "3f2c6a1e-1d8e-4c55-9a43-1b2f7d9d0c11",
+      "owner": "yang@lab",
+      "expires_at": "2026-11-05T23:07:40.496666Z"
+    },
+    "monitoring_only": false,
+    "light": {
+      "on": true,
+      "color": [
+        255,
+        255,
+        255
+      ],
+      "brightness": 0.8
+    },
+    "camera": {
+      "model": "fake",
+      "still_size": [
+        4608,
+        2592
+      ],
+      "stream_size": [
+        1280,
+        720
+      ],
+      "streaming": false,
+      "stream_viewers": 0
+    },
+    "last_snapshot": {
+      "path": "snapshots/main/capture_20261105T230710_521601Z.jpg",
+      "url": "/media/snapshots/main/capture_20261105T230710_521601Z.jpg",
+      "taken_at": "2026-11-05T23:07:10.521601+00:00",
+      "lens": "main",
+      "width": 4608,
+      "height": 2592,
+      "bytes": 13
+    },
+    "media_count": 2,
+    "stream_path": "/stream"
+  }
+}

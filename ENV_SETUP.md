@@ -126,21 +126,8 @@ Both modules automatically load credentials from the `.env` file using `python-d
 ### Server Configuration (Optional)
 
 ```bash
-# Server port (default: 2222)
+# Port the client connects to (default: 2222)
 SERVER_PORT=2222
-
-# Buffer size for socket communication (default: 2048)
-BUFFER_SIZE=2048
-
-# Chunk size for file transfer (default: 1024)
-CHUNK_SIZE=1024
-```
-
-### Tailscale IP Override (Optional)
-
-```bash
-# Force specific server IP (useful for Tailscale)
-PIZEROCAM_SERVER_IP="100.64.1.100"
 ```
 
 ## Security Best Practices
@@ -168,11 +155,6 @@ GOOGLE_APPLICATION_CREDENTIALS="/Users/macbook_m2/credentials/pizerocam-vision-k
 
 # Server Configuration (optional)
 SERVER_PORT=2222
-BUFFER_SIZE=2048
-CHUNK_SIZE=1024
-
-# Tailscale IP Override (optional)
-# PIZEROCAM_SERVER_IP="100.64.1.100"
 ```
 
 Save this as `.env` in your project root and update the paths accordingly.

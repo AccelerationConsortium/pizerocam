@@ -1,0 +1,47 @@
+{
+  "protocol_version": "1.2",
+  "equipment_id": "lle_camera_unit",
+  "equipment_name": "PiZeroCam Service",
+  "equipment_kind": "other",
+  "equipment_version": "2.0.0",
+  "host": "sdl2-pi0-lle-pizerocam",
+  "equipment_status": "dry_run",
+  "message": "camera and light disabled (no hardware)",
+  "required_actions": [],
+  "allowed_actions": [],
+  "activity": "idle",
+  "activity_since": "2026-11-05T23:07:10.626639Z",
+  "device_time": "2026-11-05T23:07:10.644065Z",
+  "uptime_seconds": 0.0,
+  "components": {
+    "camera": {
+      "connected": false,
+      "state": "disabled",
+      "message": null,
+      "last_event_at": null
+    },
+    "light": {
+      "connected": false,
+      "state": "disabled",
+      "message": null,
+      "last_event_at": null
+    }
+  },
+  "metrics": {
+    "cycles_total": {
+      "value": 0,
+      "unit": "count",
+      "timestamp": null
+    }
+  },
+  "last_error": null,
+  "details": {
+    "claimed_by": null,
+    "monitoring_only": false,
+    "light": null,
+    "camera": null,
+    "last_snapshot": null,
+    "media_count": 0,
+    "stream_path": "/stream"
+  }
+}

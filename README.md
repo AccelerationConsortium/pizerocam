@@ -1,713 +1,158 @@
-# PiZeroCam
+# PiZeroCam — PiCamera Unit
 
-A Python package for remote camera control and pH analysis using Raspberry Pi Zero 2W.
+A networked camera unit for the AC Organic self-driving lab: a Raspberry Pi Zero 2 W with a Pi Camera
+and a 12-pixel NeoPixel light ring. It serves:
 
-**Key Features:**
-- Remote camera control with LED illumination (default: RGB 10,10,10)
-- Motor control for automated testing
-- **Multi-color-space pH analysis** (RGB, LAB, HSV) with interpolation
-- pH estimation to one decimal place using inverse distance weighting
-- Modular client/server architecture
-- Easy installation with optional dependencies
-- CLI tools for both client and server
-- **Tailscale integration** for secure remote access
+- **snapshots** at full sensor resolution (optionally using the light as a flash)
+- a **live MJPEG video stream**
+- **light control**: on/off, color and brightness
+
+**This repo conforms to lab status spec v1.2**
+([`ac-organic-lab/docs/STATUS_SPEC.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/STATUS_SPEC.md)),
+including v1.1 claims with hard enforcement. On the LLE dashboard it is the **PiZeroCam Service**
+(`lle_camera_unit`).
 
 ## Architecture
 
-PiZeroCam consists of two main modules:
+- **`image_server`** runs on the Pi: a FastAPI service over the camera and light.
+- **`image_req_client`** runs on any computer: a small HTTP client and CLI for bench use, plus optional
+  pH test-strip analysis tools. In the lab, workflows drive the unit through the `lab-skills` SDK instead.
 
-- **`image_server`**: Runs on Raspberry Pi Zero 2W with camera and motor hardware
-- **`image_req_client`**: Runs on any computer to request photos and analyze them
+## HTTP API (port 2222)
 
-### Remote Access with Tailscale
+| Method | Path | Description |
+|---|---|---|
+| GET | `/` | Probe: `{equipment_id, equipment_name, protocol_version}` |
+| GET | `/health` | Process liveness |
+| GET | `/status` | STATUS_SPEC v1.2 envelope (side-effect-free) |
+| GET | `/stream` | Live MJPEG (`multipart/x-mixed-replace`) |
+| GET | `/media` | Stored snapshots, newest first |
+| GET | `/media/snapshots/main/<name>` | One stored snapshot (JPEG) |
+| POST | `/control/claim` | Acquire the claim: `{owner, session_id, ttl_s}` → `{claim_token, heartbeat_interval_s, expires_at}` |
+| POST | `/control/heartbeat` | Keep the claim alive (`X-Claim-Token`) |
+| POST | `/control/release` | Release the claim (idempotent) |
+| POST | `/control/snapshot` | Take a photo: `{flash?, settle_s?}` → `{path, url, taken_at, lens, width, height, bytes}` |
+| POST | `/control/light/on` | `{color?: [r,g,b], brightness?: 0–1}` |
+| POST | `/control/light/off` | |
+| POST | `/control/light/set` | Change `color` and/or `brightness` without switching on/off |
+| GET | `/docs`, `/openapi.json`, `/agent-docs`, `/llms.txt` | Documentation (EQUIP_GUIDE Step B3) |
 
-PiZeroCam support integration with Tailscale for secure, easy remote access:
+Every `/control/*` action except `claim` requires a live `X-Claim-Token` and returns **423** without one.
+Claims only serialize control: **releasing or losing a claim changes no hardware state** (the light stays as
+it is). The full operating semantics are in [`src/image_server/docs/AGENT_GUIDE.md`](src/image_server/docs/AGENT_GUIDE.md),
+also served at `/agent-docs`.
 
-**Benefits:**
-- **Secure**: End-to-end encrypted connections
-- **Remote**: Access your Pi from anywhere in the world
-- **Easy**: No port forwarding or firewall configuration needed
-- **Persistent**: Stable connection even when Pi changes networks
+### Status semantics
 
-**How it works:**
-Server automatically detects Tailscale IP (100.x.x.x range)
-Clients connect using the Tailscale IP instead of local network IP
+- **Primary operation (§2.3):** acquiring a still photo. `activity` is `running` from the moment a
+  snapshot is accepted until the JPEG is stored, otherwise `idle`. Streaming and the light are reported in
+  `components.camera` / `components.light`, not as activity. `metrics.cycles_total` counts snapshots.
+- `equipment_status`: `ready`; `busy` while capturing; `degraded` when the light failed or is disabled
+  (photos without flash still work) or the camera is disabled on purpose; `error` when the camera failed to
+  initialize; `dry_run` with both parts disabled.
+- `allowed_actions`: `pizerocam.snapshot` (camera up and idle), `pizerocam.light.on` / `.off` / `.set`
+  (light up).
+- Refusals: 409 `camera_unavailable` / `light_unavailable` / `capture_in_progress` / `claimed`, 422
+  `invalid_request`, 423 `claim_required`. There are no §6 preconditions, so no 412s.
+- `last_error.code` taxonomy: `capture_failed`, `light_write_failed`. Cleared by the next successful
+  control action; refusals never set it.
+- Hardware is initialized once at start; there is no startup/shutdown action.
+- Snapshots stay on the Pi (default `~/pizerocam-media`, newest 200 kept). The unit is not a record
+  store; copy anything that matters to BitacoraDB.
+
+### Authentication
+
+None in the service (STATUS_SPEC best practice 11). Tailnet ACLs and the dashboard edge gate access, and
+the dashboard decides who may control the unit. Do not expose port 2222 beyond the tailnet.
 
 ## Installation
 
-### Client Installation (on your computer)
-
-Make sure you have set up the Goolge Cloud API: https://cloud.google.com/sdk/docs/install-sdk
-
-For basic photo requesting and pH analysis:
+### Server (on the Raspberry Pi)
 
 ```bash
-git clone https://github.com/cyrilcaoyang/pizerocam.git
-cd pizerocam
-pip install -e ".[client]"
-```
-
-Alternative client options:
-- `pip install ".[client-tesseract]"` - for local Tesseract OCR (requires Tesseract installation)
-- `pip install .` - base installation without OCR dependencies
-
-### Server Installation (on Raspberry Pi)
-
-```bash
-git clone https://github.com/cyrilcaoyang/pizerocam.git
-cd pizerocam
-python3 -m venv venv --system-site-packages
-source venv/bin/activate
-
-# Install system dependencies first (if needed)
+sudo raspi-config            # Interface Options → enable SPI (NeoPixel on D10)
 sudo apt update
 sudo apt install python3-picamera2
 
-# Install the server package
+git clone https://github.com/AccelerationConsortium/pizerocam.git
+cd pizerocam
+python3 -m venv venv --system-site-packages   # needed to see the apt-installed picamera2
+source venv/bin/activate
 pip install ".[server]"
+
+pizerocam-server             # http://<pi>:2222/docs
 ```
 
-**Note:** Use `--system-site-packages` to access system-level packages like `picamera2`.
-
-#### Tailscale Integration
-
-The server automatically detects and uses Tailscale IP addresses when available:
+Requires Python 3.11+ (Raspberry Pi OS Bookworm or newer). For running it as a service on a lab device,
+follow [`ac-organic-lab/docs/DEVICE_PC_SETUP.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/DEVICE_PC_SETUP.md).
 
 ```bash
-# Install Tailscale (if not already installed)
-curl -fsSL https://tailscale.com/install.sh | sh
-
-# Connect to your Tailscale network
-sudo tailscale up
-
-# Start the server - it will automatically use Tailscale IP
-pizerocam-server
+pizerocam-server --port 2222 --resolution fhd       # still resolution: max, 4k, fhd, hd, vga
+pizerocam-server --media-dir /data/pizerocam        # where snapshots are kept
+pizerocam-server --no-camera --no-light             # no hardware (dry_run)
 ```
 
-**Manual IP Override:**
-```bash
-# Force specific IP address
-export PIZEROCAM_SERVER_IP="100.64.1.100"
-pizerocam-server
-```
+If the camera or light fails to initialize, the service still starts and `/status` reports why
+(`error` or `degraded`). Settings live in `src/image_server/server_settings.yaml`
+(equipment id/name, port, resolutions, settle time, media cap, LED defaults). Set
+`PIZEROCAM_CORS_ORIGINS` (comma-separated) to allow the dashboard origin in browsers.
 
-### Developer Installation
-
-To install both client and server components:
+### Client (on your computer)
 
 ```bash
-pip install .[client,server]
+pip install -e ".[client]"            # client + pH analysis tools
+pip install -e .                      # client only
 ```
 
-## Usage
+## Client usage (bench / scripts)
 
-### Quick Start with CLI Tools
-
-**Start the server (on Raspberry Pi):**
 ```bash
-# Default (tries 4608x2592 first, falls back automatically)
-pizerocam-server
-
-# Force maximum resolution
-pizerocam-server --resolution max
-
-# Use Full HD for faster processing
-pizerocam-server --resolution fhd
-
-# Disable motor if PCA9685 not available
-pizerocam-server --no-motor
+pizerocam-client --ip 100.64.254.98                          # interactive session
+pizerocam-client --ip 100.64.254.98 --photo --flash          # saved to ~/Pictures/pizerocam
+pizerocam-client --ip 100.64.254.98 --light on --color 255,0,0 --brightness 0.5
+pizerocam-client --ip 100.64.254.98 --light off
+pizerocam-client --ip 100.64.254.98 --status
 ```
-
-**Connect from client (on your computer):**
-```bash
-# Interactive session
-pizerocam-client --ip 192.168.1.100
-
-# Request photo and analyze pH
-pizerocam-client --ip 192.168.1.100 --photo --analyze
-
-# Change LED color to red
-pizerocam-client --ip 192.168.1.100 --led 255,0,0
-
-# Run motor
-pizerocam-client --ip 192.168.1.100 --motor
-```
-
-### Multi-Color-Space pH Analysis
-
-PiZeroCam analyzes pH values using **three different color spaces simultaneously** and returns all results:
-
-- **RGB**: Standard red-green-blue color space
-- **LAB**: Perceptually uniform color space (recommended for best accuracy)
-- **HSV**: Hue-saturation-value color space
-
-All pH analyses:
-- Return interpolated values to **one decimal place** using inverse distance weighting
-- Include distance metrics showing confidence for each color space
-- Generate annotated images highlighting the analyzed region
-
-**Example output:**
-```
-pH ANALYSIS RESULTS
-============================================================
-  RGB: pH   7.3  (distance:  15.23)
-  LAB: pH   7.1  (distance:  12.45)
-  HSV: pH   8.0  (distance:  18.67)
-============================================================
-```
-
-The result with the **smallest distance** typically indicates the most reliable measurement. LAB color space generally provides the best results for color-based pH detection.
-
-### Python API Usage
-
-**Client API:**
 
 ```python
 from image_req_client import ImageReqClient
 
-# Create and connect to server
-client = ImageReqClient()
-client.connect("192.168.1.100")
+client = ImageReqClient(port=2222)
+client.connect("100.64.254.98")
+path = client.request_photo(flash=True)   # claims, captures, releases
 
-# Request photo and analyze - returns all three color spaces
-image_path = client.request_photo()
-if image_path:
-    ph_result = client.analyze_photo(image_path)
-    # Returns: {'rgb': 7.3, 'lab': 7.1, 'hsv': 8.0, 'distances': {...}}
-    print(f"RGB pH: {ph_result['rgb']:.1f}")
-    print(f"LAB pH: {ph_result['lab']:.1f}")
-    print(f"HSV pH: {ph_result['hsv']:.1f}")
-
-# Control LED and motor
-client.change_led_color(255, 0, 0)  # Red LED
-client.run_motor()
-
-# Disconnect
-client.disconnect()
-
-# Or use as context manager
-with ImageReqClient() as client:
-    client.connect("192.168.1.100")
-    image_path, ph_result = client.request_and_analyze_photo()
-    if ph_result != "NULL":
-        # Use whichever color space you prefer
-        lab_ph = ph_result['lab']  # LAB is best for color perception
-        print(f"Image: {image_path}, LAB pH: {lab_ph:.1f}")
+with client.control():                    # one claim, heartbeated, for several actions
+    client.light_on(color=(255, 255, 255), brightness=0.8)
+    client.request_photo()
+    client.light_off()
 ```
 
-**Server API:**
-
-```python
-from image_server import ImageServer
-
-# Basic start/stop with all hardware
-server = ImageServer(host="0.0.0.0", port=2222)
-print(f"Server IP: {server.get_ip_address()}")
-
-# Hardware configuration options
-server_no_hw = ImageServer(init_camera=False, init_motor=False)  # No hardware
-server_cam_only = ImageServer(init_camera=True, init_motor=False)  # Camera only
-server_motor_only = ImageServer(init_camera=False, init_motor=True)  # Motor only
-server_full = ImageServer(init_camera=True, init_motor=True)  # All hardware
-
-# Camera resolution options
-server_max_res = ImageServer(resolution="max")  # Maximum 4608x2592
-server_4k = ImageServer(resolution="4k")        # 4K 3840x2160
-server_fhd = ImageServer(resolution="fhd")      # Full HD 1920x1080
-
-# Start in background (non-blocking)
-if server.start(background=True):
-    print("Server started successfully")
-    
-    # Do other work while server runs...
-    input("Press Enter to stop server...")
-    
-    # Stop server
-    if server.stop():
-        print("Server stopped successfully")
-
-# Start in foreground (blocking)
-server.start(background=False)  # This will block until stopped
-
-# Context manager (automatic cleanup)
-with ImageServer(init_camera=False, init_motor=False) as server:
-    print(f"Server running at {server.get_ip_address()}")
-    # Server runs until context exits
-
-# Status checking
-if not server.is_running():
-    server.start()
-print(f"Server status: {'Running' if server.is_running() else 'Stopped'}")
-```
-
-**pH Analysis Standalone:**
-
-```python
-from image_req_client import ph_from_image
-
-# Analyze existing image - returns all three color spaces
-ph_result = ph_from_image(
-    "path/to/image.jpg",
-    return_all_color_spaces=True,
-    output_dir="same",  # Save annotated images in same folder
-    interpolate=True     # Interpolate to 1 decimal place
-)
-
-if ph_result != "NULL":
-    print(f"RGB pH: {ph_result['rgb']:.1f}")
-    print(f"LAB pH: {ph_result['lab']:.1f}")
-    print(f"HSV pH: {ph_result['hsv']:.1f}")
-    print(f"Distances: {ph_result['distances']}")
-```
-
-## Server Control and Management
-
-### Starting and Stopping the Server
-
-The ImageServer provides comprehensive start/stop functionality with multiple usage patterns:
-
-#### 1. Command Line Interface
-
-**Basic server start:**
-```bash
-# Start with default settings (host: 0.0.0.0, port: 2222)
-pizerocam-server
-
-# Custom host and port
-pizerocam-server --host 192.168.1.100 --port 3333
-
-# Enable verbose logging
-pizerocam-server --verbose
-```
-
-**Stopping the server:**
-- Press `Ctrl+C` for graceful shutdown
-- The CLI handles signal management automatically
-
-#### 2. Python API Control
-
-**Background Mode (Non-blocking):**
-```python
-from image_server import ImageServer
-
-server = ImageServer()
-
-# Start server in background thread
-if server.start(background=True):
-    print("Server started successfully")
-    print(f"Server IP: {server.get_ip_address()}")
-    
-    # Your application continues running here
-    # Server handles requests in the background
-    
-    # Stop when needed
-    server.stop()
-```
-
-**Foreground Mode (Blocking):**
-```python
-from image_server import ImageServer
-
-server = ImageServer()
-
-try:
-    # This will block until server is stopped
-    server.start(background=False)
-except KeyboardInterrupt:
-    print("Server interrupted")
-finally:
-    server.stop()
-```
-
-**Context Manager (Automatic Cleanup):**
-```python
-from image_server import ImageServer
-
-# Server automatically stops when exiting context
-with ImageServer(host="0.0.0.0", port=2222) as server:
-    print(f"Server running at {server.get_ip_address()}")
-    input("Press Enter to stop...")
-# Server automatically stopped here
-```
-
-**Status Monitoring:**
-```python
-from image_server import ImageServer
-import time
-
-server = ImageServer()
-
-# Check if server is running
-if not server.is_running():
-    print("Starting server...")
-    server.start()
-
-# Monitor status
-while server.is_running():
-    print(f"Server status: Running on {server.get_ip_address()}")
-    time.sleep(5)
-    
-    # Stop condition (example)
-    if some_stop_condition():
-        server.stop()
-        break
-
-print("Server stopped")
-```
-
-#### 3. Advanced Server Management
-
-**Error Handling:**
-```python
-from image_server import ImageServer
-
-server = ImageServer()
-
-try:
-    if server.start():
-        print("Server started successfully")
-    else:
-        print("Failed to start server - check logs")
-        
-    # Server operations...
-    
-except Exception as e:
-    print(f"Server error: {e}")
-finally:
-    if server.is_running():
-        if server.stop():
-            print("Server stopped gracefully")
-        else:
-            print("Error stopping server")
-```
-
-**Multiple Server Instances:**
-```python
-from image_server import ImageServer
-
-# Create multiple servers on different ports
-server1 = ImageServer(port=2222)
-server2 = ImageServer(port=2223)
-
-# Start both
-server1.start(background=True)
-server2.start(background=True)
-
-print(f"Server 1: {server1.get_ip_address()}:2222")
-print(f"Server 2: {server2.get_ip_address()}:2223")
-
-# Stop both
-server1.stop()
-server2.stop()
-```
-
-### Server Features
-
-- **Graceful Shutdown**: Proper cleanup of resources and connections
-- **Thread Safety**: Safe concurrent client handling
-- **Error Recovery**: Robust error handling and logging
-- **Status Monitoring**: Real-time server status checking
-- **Flexible Deployment**: Background or foreground operation modes
-- **Context Management**: Automatic resource cleanup
-- **Signal Handling**: Responds to system signals (Ctrl+C, SIGTERM)
-
-## Troubleshooting
-
-### Common Hardware Issues
-
-#### Camera Memory Allocation Error
-**Error:** `OSError: [Errno 12] Cannot allocate memory`
-
-**Solution:** The server automatically tries different camera resolutions. If it still fails:
-```python
-# Use server without camera
-server = ImageServer(init_camera=False, init_motor=True)
-```
-
-#### Motor I2C Communication Error  
-**Error:** `OSError: [Errno 5] Input/output error` (PCA9685)
-
-**Solutions:**
-1. Check I2C is enabled: `sudo raspi-config` → Interface Options → I2C
-2. Verify PCA9685 connection and address
-3. Use server without motor:
-```python
-# Use server without motor
-server = ImageServer(init_camera=True, init_motor=False)
-```
-
-#### LED/NeoPixel Issues
-**Error:** LED initialization fails
-
-**Check:**
-- GPIO permissions: Add user to `gpio` group
-- NeoPixel wiring and power supply
-- Board pin configuration
-
-#### Tailscale IP Detection Issues
-**Problem:** Server not detecting Tailscale IP
-
-**Solutions:**
-1. **Check Tailscale status:**
-   ```bash
-   tailscale status
-   tailscale ip
-   ```
-
-2. **Manual IP override:**
-   ```bash
-   export PIZEROCAM_SERVER_IP="100.x.x.x"  # Your Tailscale IP
-   pizerocam-server
-   ```
-
-3. **Python API override:**
-   ```python
-   import os
-   os.environ['PIZEROCAM_SERVER_IP'] = '100.x.x.x'
-   server = ImageServer()
-   ```
-
-#### Full Hardware Not Available
-**For testing/development without hardware:**
-```python
-# Minimal server for testing
-server = ImageServer(init_camera=False, init_motor=False)
-```
-
-### Hardware Configuration Examples
-
-```python
-from image_server import ImageServer
-
-# Development/Testing (no hardware required)
-server = ImageServer(init_camera=False, init_motor=False)
-
-# Photography only (camera + LED)
-server = ImageServer(init_camera=True, init_motor=False)
-
-# Motor testing only 
-server = ImageServer(init_camera=False, init_motor=True)
-
-# Full pH testing setup (all hardware)
-server = ImageServer(init_camera=True, init_motor=True)
-```
-
-## Hardware Setup (Raspberry Pi Server)
-
-### Required Components
-- Raspberry Pi Zero 2W/WH
-- Pi Camera 3
-- NeoPixel ring LED
-- PCA9685 PWM driver (for motor control)
-- DC motor
-- Optional: PiSugar for UPS functionality
-
-### Setup Instructions
-
-1. **Enable interfaces:**
-   ```bash
-   sudo raspi-config
-   ```
-   Enable SPI and I2C under "Interface Options"
-
-2. **Install system dependencies:**
-   ```bash
-   sudo apt update
-   sudo apt install python3-picamera2 portaudio19-dev
-   ```
-
-3. **Optional - Install PiSugar:**
-   ```bash
-   wget https://cdn.pisugar.com/release/pisugar-power-manager.sh
-   bash pisugar-power-manager.sh -c release
-   ```
-
-4. **Install PiZeroCam:**
-   ```bash
-   git clone https://github.com/cyrilcaoyang/pizerocam.git
-   cd pizerocam
-   python3 -m venv venv --system-site-packages
-   source venv/bin/activate
-   pip install ".[server]"
-   ```
-
-5. **Start the server:**
-   ```bash
-   pizerocam-server
-   ```
-
-### Hardware Connections
-
-**NeoPixel LED:**
-- Connect to GPIO pin (configured in server code)
-- Provides illumination for camera
-
-**Motor (via PCA9685):**
-- PWMA: Channel 0
-- AIN1: Channel 1  
-- AIN2: Channel 2
-- I2C address: 0x40
-
-## pH Analysis
-
-The pH analysis tool uses Google Cloud Vision API for OCR text detection and multi-color-space analysis to determine pH values from test strips.
-
-### Features
-- **Multi-color-space analysis**: Analyzes pH using RGB, LAB, and HSV color spaces
-- **Interpolated pH estimation**: Estimates pH to one decimal place using inverse distance weighting
-- **OCR-based detection**: Detects pH numbers (1-12) in grid layouts using Google Cloud Vision API
-- **Color block analysis**: Analyzes color blocks below detected numbers
-- **Distance metrics**: Calculates Euclidean distances in each color space
-- **Visual output**: Generates annotated images highlighting ROI and detected pH boxes
-- **Smart number handling**: Handles multi-digit number splitting intelligently
-
-### Color Spaces
-- **RGB**: Standard red-green-blue color space
-- **LAB**: Perceptually uniform color space (recommended for best color matching)
-- **HSV**: Hue-saturation-value color space
-
-### Requirements
-- Google Cloud Vision API credentials
-- Environment variable: `GOOGLE_APPLICATION_CREDENTIALS`
-- OpenCV (cv2) for color space conversions
-
-### Configuration
-The analysis region is currently configured for coordinates (750, 1100, 150, 300). Modify in the source code as needed for your specific test strips.
-
-### Output
-All pH analyses return a dictionary containing:
-```python
-{
-    'rgb': 7.3,      # pH value from RGB color space
-    'lab': 7.1,      # pH value from LAB color space (recommended)
-    'hsv': 8.0,      # pH value from HSV color space
-    'distances': {   # Minimum distances to reference colors
-        'rgb': 15.23,
-        'lab': 12.45,
-        'hsv': 18.67
-    }
-}
-```
-
-Annotated images are saved showing:
-- Step 1: OCR text detection boxes
-- Step 2: Defined color boxes
-- Step 3: Highlighted target box with pH result
-
-## API Reference
-
-### ImageReqClient Methods
-
-**Constructor:**
-- `ImageReqClient(port=2222, logger=None)`
-  - `port`: Server port (default: 2222)
-  - `logger`: Optional logger instance
-
-**Connection Methods:**
-- `connect(ip)` - Connect to server (returns bool)
-- `disconnect()` - Disconnect from server (returns bool)
-- Context manager support (`__enter__`/`__exit__`)
-
-**Photo Methods:**
-- `request_photo()` - Request and receive photo (returns str filepath or None)
-- `analyze_photo(filepath, output_dir="same")` - Analyze photo for pH
-  - Returns: `dict` with `{'rgb': float, 'lab': float, 'hsv': float, 'distances': dict}` or `"NULL"`
-- `request_and_analyze_photo(output_dir="same")` - Combined request and analysis
-  - Returns: `tuple` of `(image_path, ph_result)`
-
-**Hardware Control:**
-- `change_led_color(r, g, b)` - Change LED color (returns bool)
-- `run_motor()` - Run motor (returns bool)
-
-**Interactive:**
-- `interactive_session()` - Start interactive menu-driven session
-
-### ImageServer Methods
-
-**Constructor:**
-- `ImageServer(host="0.0.0.0", port=2222, init_camera=True, init_motor=True, resolution=None)`
-  - `host`: Host address to bind to
-  - `port`: Port to listen on
-  - `init_camera`: Whether to initialize camera hardware
-  - `init_motor`: Whether to initialize motor hardware
-  - `resolution`: Camera resolution preference ("max", "4k", "fhd", "hd", "vga")
-
-**Methods:**
-- `start(background=True)` - Start server (returns bool)
-  - `background=True`: Non-blocking, runs in background thread
-  - `background=False`: Blocking, runs in current thread
-- `stop()` - Stop server gracefully (returns bool)
-- `is_running()` - Check if server is currently running (returns bool)
-- `get_ip_address()` - Get server's IP address (returns str)
-- `get_logger()` - Get server's logger instance
-- Context manager support (`__enter__`/`__exit__`)
-
-### CLI Options
-
-**pizerocam-client:**
-```
---ip IP          Server IP address (required)
---port PORT      Server port (default: 2222)
---photo          Request photo
---analyze        Analyze photo for pH (returns RGB, LAB, HSV)
---led R,G,B      Change LED color
---motor          Run motor
---interactive    Interactive session (default)
-```
-
-**pizerocam-server:**
-```
---host HOST         Bind interface (default: 0.0.0.0)
---port PORT         Listen port (default: 2222)
---verbose           Enable verbose logging
---no-camera         Disable camera initialization
---no-motor          Disable motor initialization
---resolution RES    Camera resolution (max=4608x2592, 4k=3840x2160, 
-                    fhd=1920x1080, hd=1280x720, vga=640x480)
-```
+## Hardware
+
+- Raspberry Pi Zero 2 W/WH
+- Pi Camera Module 3 (autofocus set to continuous when supported)
+- 12-pixel NeoPixel ring on **GPIO10 / board.D10 (SPI MOSI)** (this pin is required)
 
 ## Development
 
-### Project Structure
-```
-pizerocam/
-├── src/
-│   ├── image_req_client/          # Client module
-│   │   ├── __init__.py
-│   │   ├── image_req_client.py    # Main client class (use this!)
-│   │   ├── ph_grid_color_reader.py # Multi-color-space pH analysis
-│   │   ├── simple_photo_analyzer.py # Simple pH analyzer (no OCR)
-│   │   ├── photo_analyzer.py      # DEPRECATED: legacy analyzers
-│   │   └── cli.py                 # CLI interface
-│   ├── image_server/              # Server module
-│   │   ├── __init__.py
-│   │   ├── image_server.py        # High-level server wrapper
-│   │   ├── server.py              # CameraServer (camera + LED + motor)
-│   │   ├── PCA9685.py            # Motor driver
-│   │   └── cli.py                # CLI interface
-│   ├── logger.py                  # Logging utilities
-│   └── socket_utils.py           # Socket communication helpers
-├── examples/                      # Example scripts
-│   ├── analyze_ph_multi_colorspace.py
-│   ├── ph_color_space_examples.py
-│   └── ph_read.py
-├── pyproject.toml                # Package configuration
-└── README.md
+```bash
+uv run --extra test pytest
 ```
 
-### Contributing
-1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+Tests use a fake camera and light; `tests/fixtures/status_*.json` are STATUS_SPEC snapshot fixtures
+(ready, ready with claim, busy, degraded, degraded + running, error, dry_run, cleared/active `last_error`),
+each checked with `sdl_lab_contract.check_consistency`.
+
+## Optional: pH test-strip analysis (client side)
+
+The `client` extra includes tools that analyze a captured photo of a pH test strip in RGB, LAB and HSV
+(Google Cloud Vision OCR for the reference grid). See `examples/` and `ENV_SETUP.md`.
+
+```python
+path = client.request_photo(flash=True)
+result = client.analyze_photo(path, roi_config={"ROI_X": 750, "ROI_Y": 1100, "ROI_W": 150, "ROI_H": 300})
+```
 
 ## License
 
-MIT License - see LICENSE file for details.
-
-## Support
-
-For issues and questions:
-- GitHub Issues: https://github.com/AccelerationConsortium/pizerocam/issues
-- Email: cyrilcaoyang@gmail.com
+MIT License — see LICENSE.

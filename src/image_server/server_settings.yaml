@@ -1,3 +1,23 @@
-BufferSize : 2048
-ChunkSize : 1024
-ServerPort : 2222
+# PiCamera unit settings (STATUS_SPEC v1.2 device service)
+EquipmentId: lle_camera_unit
+EquipmentName: PiZeroCam Service
+ServerPort: 2222
+
+# Still photo resolution preference: max, 4k, fhd, hd, vga (falls back to smaller if it fails)
+PhotoResolution: max
+# Seconds to wait after a flash snapshot switches the light on, so auto-exposure/focus settle.
+# Requests may override with settle_s (0-8 s; the cap keeps a snapshot inside the
+# dashboard control proxy's 15 s timeout).
+PhotoSettleSeconds: 5
+
+# MJPEG video stream resolution [width, height]
+StreamSize: [1280, 720]
+
+# Snapshots are kept on the Pi (oldest deleted first) and served from /media
+MediaDir: ~/pizerocam-media
+MediaMaxFiles: 200
+
+# NeoPixel LED ring (data pin is fixed to board.D10 / SPI MOSI)
+LedCount: 12
+LightDefaultColor: [255, 255, 255]
+LightBrightness: 1.0

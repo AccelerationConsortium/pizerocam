@@ -1,10 +1,9 @@
-from image_server import server
+"""
+Run the PiCamera unit service on a Pi Zero 2 W/WH (same as `pizerocam-server`).
+Then open http://<pi-ip>:2222/docs.
+"""
 
-"""
-This script runs the camera server on Pi Zero 2 W/WH
-"""
+from image_server.cli import main_server
 
 if __name__ == "__main__":
-    camera = server.CameraServer()
-    camera.test_led(camera.led)
-    camera.start_server()
+    main_server()

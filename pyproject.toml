@@ -4,11 +4,11 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "pizerocam"
-version = "0.9.0"
-description='Python utils package for self-driving labs'
+version = "2.0.0"
+description='PiCamera unit (STATUS_SPEC v1.2 snapshot/stream/light service) and client for self-driving labs'
 readme = "README.md"
 license = {file = "LICENSE"}
-requires-python = ">=3.8"
+requires-python = ">=3.11"
 dependencies = [
     "pyyaml>=6.0",
     "netifaces>=0.11.0"
@@ -20,7 +20,7 @@ classifiers = [
     "License :: MIT",
     "Programming Language :: Python",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.11",
     "Intended Audience :: Developers",
     "Intended Audience :: Science/Research",
     "Natural Language :: English",
@@ -36,12 +36,22 @@ authors = [
 server = [
     "picamera2",
     "adafruit-circuitpython-neopixel",
-    "RPi.GPIO"
+    "rpi_ws281x>=4.0.0; platform_system == 'Linux' and platform_machine == 'aarch64'",  # NeoPixel backend on the Pi
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",
+]
+test = [
+    "fastapi>=0.110",
+    "uvicorn>=0.29",
+    "httpx",
+    "pytest>=8",
+    "sdl-lab-contract @ git+https://github.com/AccelerationConsortium/sdl-lab-contract@v1.2.1",
 ]
 client = [
     "opencv-python>=4.5.0,<5.0.0",
     "numpy>=1.21.0,<2.0.0",
-    "pillow>=8.0.0",
+    "pillow>=13.0.0",
     "matplotlib",
     "google-cloud-vision",
     "python-dotenv"
@@ -49,7 +59,7 @@ client = [
 client-tesseract = [
     "opencv-python>=4.5.0,<5.0.0",
     "numpy>=1.21.0,<2.0.0",
-    "pillow>=8.0.0",
+    "pillow>=13.0.0",
     "pytesseract==0.3.13",
     "matplotlib",
     "python-dotenv"
@@ -61,7 +71,14 @@ pizerocam-server = "image_server.cli:main_server"
 
 [tool.setuptools]
 packages = ["image_req_client", "image_server"]
-py-modules = ["logger", "socket_utils"]
+py-modules = ["logger"]
+
+[tool.setuptools.package-data]
+image_server = ["server_settings.yaml", "docs/*.md"]
 
 [tool.setuptools.package-dir]
 "" = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
