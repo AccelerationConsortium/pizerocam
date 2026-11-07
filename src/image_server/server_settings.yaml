@@ -1,6 +1,6 @@
 # PiCamera unit settings (STATUS_SPEC v1.2 device service)
 EquipmentId: lle_camera_unit
-EquipmentName: Camera Unit (LLE)
+EquipmentName: PiZeroCam Service
 ServerPort: 2222
 
 # Still photo resolution preference: max, 4k, fhd, hd, vga (falls back to smaller if it fails)

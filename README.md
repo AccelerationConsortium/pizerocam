@@ -9,7 +9,7 @@ and a 12-pixel NeoPixel light ring. It serves:
 
 **This repo conforms to lab status spec v1.2**
 ([`ac-organic-lab/docs/STATUS_SPEC.md`](https://github.com/AccelerationConsortium/ac-organic-lab/blob/main/docs/STATUS_SPEC.md)),
-including v1.1 claims with hard enforcement. On the LLE dashboard it is the **Camera Unit (LLE)**
+including v1.1 claims with hard enforcement. On the LLE dashboard it is the **PiZeroCam Service**
 (`lle_camera_unit`).
 
 ## Architecture

@@ -1,7 +1,7 @@
 {
   "protocol_version": "1.2",
   "equipment_id": "lle_camera_unit",
-  "equipment_name": "Camera Unit (LLE)",
+  "equipment_name": "PiZeroCam Service",
   "equipment_kind": "other",
   "equipment_version": "2.0.0",
   "host": "sdl2-pi0-lle-pizerocam",

@@ -21,7 +21,7 @@ def status(client):
 
 def test_probe_health_docs(make_client):
     c = make_client()
-    assert c.get("/").json() == {"equipment_id": "lle_camera_unit", "equipment_name": "Camera Unit (LLE)",
+    assert c.get("/").json() == {"equipment_id": "lle_camera_unit", "equipment_name": "PiZeroCam Service",
                                  "protocol_version": "1.2"}
     assert c.get("/health").json() == {"status": "healthy"}
     assert c.get("/openapi.json").status_code == 200

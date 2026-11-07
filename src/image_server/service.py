@@ -47,7 +47,7 @@ LOG = logging.getLogger("pizerocam")
 
 DEFAULT_SETTINGS = {
     "EquipmentId": "lle_camera_unit",
-    "EquipmentName": "Camera Unit (LLE)",
+    "EquipmentName": "PiZeroCam Service",
     "ServerPort": 2222,
     "PhotoResolution": "max",
     "PhotoSettleSeconds": 5,
